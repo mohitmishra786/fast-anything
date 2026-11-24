@@ -890,7 +890,10 @@ mod tests {
             eprintln!("no python on PATH, skipping");
             return;
         };
-        let dir = std::env::temp_dir().join(format!("fa-py-duration-test-{}", std::process::id()));
+        let tmp = std::env::temp_dir();
+        // macOS's temp folder is behind a symlink; the profile has the real paths
+        let tmp = if cfg!(windows) { tmp } else { tmp.canonicalize().unwrap() };
+        let dir = tmp.join(format!("fa-py-duration-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         // a server's shape: some work, then a long blocking wait
         let app = "import time\n\ndef work(n):\n    return sum(i * i for i in range(n))\n\nif __name__ == '__main__':\n    while True:\n        work(20000)\n        time.sleep(0.05)\n        if work(1) > 0:\n            time.sleep(3600)\n";
