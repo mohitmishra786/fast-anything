@@ -36,7 +36,7 @@ pub fn scan(root: &Path, command: Vec<String>, duration: Option<f64>) -> Result<
     let lang = crate::cfamily::refine(Lang::detect(&command[0])?, &command[1..]);
     let lang = crate::kotlin::refine(lang, &command[0], &ctx.root);
     if let Some(d) = duration {
-        ensure!(lang.stops_after_duration(), "--duration works for Python and C# apps only so far");
+        ensure!(lang.stops_after_duration(), "--duration works for Python, JavaScript/TypeScript and C# apps only so far");
         ensure!(d.is_finite() && d > 0.0, "--duration takes a number of seconds, e.g. --duration 30");
     }
     let exe = lang.resolve(&command[0], &ctx.root)?;

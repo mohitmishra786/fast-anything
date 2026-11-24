@@ -11,9 +11,11 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
 const RUNNER: &str = include_str!("node/runner.mjs");
 const RECORDER: &str = include_str!("node/recorder.cjs");
+const STOP: &str = include_str!("node/stop.cjs");
 
 pub fn is_node(program: &str) -> bool {
     Runtime::of(program).is_some()
@@ -136,20 +138,31 @@ fn runner(ctx: &Ctx, node: &str, mode: &str, job: Value) -> Result<Output> {
     Ok(out)
 }
 
-pub fn profile(ctx: &Ctx, node: &str, args: &[String]) -> Result<Profile> {
+/// `duration`: end the app after that many seconds (servers and GUIs that run until closed).
+pub fn profile(ctx: &Ctx, node: &str, args: &[String], duration: Option<f64>) -> Result<Profile> {
     let script = entry(args).context("name the script to run, e.g.  fast-anything scan -- node app.js")?;
     let dir = ctx.fast.join("cpuprof");
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir)?;
     let runtime = runtime_of(node);
     let dir_text = dir.to_string_lossy().into_owned();
-    let out = output(
-        Command::new(node)
-            .args(runtime.with(&["--cpu-prof", "--cpu-prof-interval", "250", "--cpu-prof-dir", &dir_text], args))
-            .current_dir(&ctx.root)
-            .stdin(Stdio::null()),
+    let stop = ctx.fast.join("stop.cjs");
+    let stop_text = stop.to_string_lossy().into_owned();
+    let mut options = vec!["--cpu-prof", "--cpu-prof-interval", "250", "--cpu-prof-dir", &dir_text];
+    let mut cmd = Command::new(node);
+    if let Some(d) = duration {
+        // the app ends itself (process.exit), so the profile is written as on a normal exit
+        fs::write(&stop, STOP)?;
+        options.extend([if runtime == Runtime::Node { "--require" } else { "--preload" }, &stop_text]);
+        cmd.env("FAST_ANYTHING_STOP_AFTER_MS", ((d * 1000.0) as u64).to_string());
+    }
+    let (out, killed) = crate::util::output_for(
+        cmd.args(runtime.with(&options, args)).current_dir(&ctx.root).stdin(Stdio::null()),
         runtime.name(),
+        duration.map(|d| Duration::from_secs_f64(d + 15.0)),
+        Duration::from_secs(10),
     )?;
+    ensure!(!killed, "the app was still running 15s after --duration: does it call process.exit?");
     ensure!(out.status.success(), "the app failed ({}):\n{}", out.status, tail(&combined(&out), 30));
     let result = ctx.fast.join("profile.json");
     let job = json!({ "root": ctx.root, "dir": dir, "entry": ctx.root.join(script), "out": result });
@@ -661,6 +674,27 @@ mod tests {
         assert_eq!(Runtime::Deno.script(Path::new("runner.mjs")), args("run -A runner.mjs"));
         assert_eq!(entry(&args("run -A --allow-ffi app.ts data.txt")).map(String::as_str), Some("app.ts"));
         assert_eq!(entry(&args("run app.ts")).map(String::as_str), Some("app.ts"));
+    }
+
+    #[test]
+    fn duration_ends_an_app_that_runs_until_closed() {
+        if !Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no node on PATH, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("fa-node-duration-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        // a server's shape: work on a timer, forever
+        let app = "function work(n) {\n  let s = 0;\n  for (let i = 0; i < n; i++) s += i * i;\n  return s;\n}\nsetInterval(() => work(3e6), 5);\n";
+        fs::write(dir.join("app.js"), app).unwrap();
+        let ctx = Ctx::open(&dir).unwrap();
+        let started = std::time::Instant::now();
+        let p = profile(&ctx, "node", &["app.js".into()], Some(1.5));
+        let took = started.elapsed().as_secs_f64();
+        let _ = fs::remove_dir_all(&dir);
+        let p = p.unwrap();
+        assert!(p.functions.iter().any(|f| f.name == "work"), "{:?}", p.functions);
+        assert!(took < 12.0, "{took}");
     }
 
     #[test]
