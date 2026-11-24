@@ -712,7 +712,7 @@ def cmd_profile(job, argv):
     entry, base = prepare_path(kind, target)
     root = job["root"]
     prof = cProfile.Profile()
-    sys.modules["_fast_anything_state"] = ChildState("profile", os.environ.get("FAST_ANYTHING_CHILDREN", ""))
+    sys.modules["_fast_anything_state"] = ChildState("profile", os.environ.get("FAST_ANYTHING_CHILDREN", ""), inherited=prof)
     start = time.perf_counter()
     prof.enable()
     try:
@@ -850,14 +850,19 @@ class ChildState:
     """What a multiprocessing worker does while fast-anything profiles or records the app: its own
     profiler or recorder, written to `out_dir` when the worker ends."""
 
-    def __init__(self, mode, out_dir, recorder=None):
+    def __init__(self, mode, out_dir, recorder=None, inherited=None):
         self.mode, self.out_dir, self.recorder, self.profiler = mode, out_dir, recorder, None
+        self.inherited = inherited  # the parent's profiler, which a forked worker has a copy of
 
     def start(self):
         if self.mode == "profile":
             import cProfile
 
-            sys.setprofile(None)  # a forked worker inherits the parent's profiler
+            # a forked worker inherits the parent's profiler, still on: since 3.12 it holds
+            # sys.monitoring's profiler slot, and a second one can't start until it's off
+            if self.inherited is not None:
+                self.inherited.disable()
+            sys.setprofile(None)
             self.profiler = cProfile.Profile()
             self.profiler.enable()
         elif self.recorder is not None:

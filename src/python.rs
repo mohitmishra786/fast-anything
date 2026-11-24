@@ -1587,6 +1587,19 @@ sys.exit(1 if fails else 0)
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn forked_pool_workers_are_profiled_and_recorded() {
+        // a forked worker starts with the parent's profiler still on (fork isn't the default
+        // everywhere: macOS and Python 3.14 use spawn or forkserver)
+        assert_workers_profiled_and_recorded(
+            "pool-fork-test",
+            "from multiprocessing import get_context\nfrom work import sq\n\nif __name__ == \"__main__\":\n\
+             \x20   with get_context(\"fork\").Pool(2) as pool:\n\
+             \x20       print(sum(pool.map(sq, range(20))))\n",
+        );
+    }
+
     #[test]
     fn pool_terminate_does_not_run_queued_tasks_or_hang() {
         let tasks = "import pathlib, time\n\n\
