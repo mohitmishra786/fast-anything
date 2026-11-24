@@ -59,6 +59,19 @@ pub fn output_signalling(
     grace: Duration,
     signal: &str,
 ) -> Result<(Output, bool)> {
+    output_stopping(cmd, what, limit, grace, signal, || true)
+}
+
+/// output_signalling, for an app that saves its own results on time: where it can't be asked to close (a
+/// console app on Windows), it's left to run, at most `grace` longer, until `saved` says they're written.
+pub fn output_stopping(
+    cmd: &mut Command,
+    what: &str,
+    limit: Option<Duration>,
+    grace: Duration,
+    signal: &str,
+    saved: impl Fn() -> bool,
+) -> Result<(Output, bool)> {
     let Some(limit) = limit else { return Ok((output(cmd, what)?, false)) };
     let mut child = cmd
         .stdout(Stdio::piped())
@@ -76,16 +89,14 @@ pub fn output_signalling(
     }
     let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
     let started = Instant::now();
-    let mut asked: Option<Instant> = None;
+    let mut asked: Option<(Instant, bool)> = None;
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
         }
         match asked {
-            None if started.elapsed() >= limit => {
-                asked = Some(if ask_to_close(child.id(), signal) { Instant::now() } else { Instant::now() - grace });
-            }
-            Some(at) if at.elapsed() >= grace => {
+            None if started.elapsed() >= limit => asked = Some((Instant::now(), ask_to_close(child.id(), signal))),
+            Some((at, closing)) if at.elapsed() >= grace || (!closing && saved()) => {
                 let _ = child.kill();
                 break child.wait()?;
             }

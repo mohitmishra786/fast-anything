@@ -255,6 +255,29 @@ pub fn profile(ctx: &Ctx, program: &str, args: &[String], duration: Option<f64>)
     profile_with(ctx, program, args, duration, |java| describe(ctx, java, &sources(&ctx.root, program, args)?))
 }
 
+/// Every flight recording in `dir` is written out: there is one, none is empty, and none is still open for
+/// writing (Windows only lets a file be opened exclusively once its writer has closed it).
+fn recordings_written(dir: &Path) -> bool {
+    let files: Vec<PathBuf> = match fs::read_dir(dir) {
+        Ok(entries) => {
+            entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "jfr")).collect()
+        }
+        Err(_) => return false,
+    };
+    !files.is_empty() && files.iter().all(|f| fs::metadata(f).is_ok_and(|m| m.len() > 0) && closed(f))
+}
+
+#[cfg(windows)]
+fn closed(f: &Path) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    fs::OpenOptions::new().read(true).share_mode(0).open(f).is_ok()
+}
+
+#[cfg(not(windows))]
+fn closed(_: &Path) -> bool {
+    true
+}
+
 /// Profile the app with Flight Recorder and rank the methods `describe` finds in its sources
 /// (given the JDK that runs the build). `duration`: stop the app after that many seconds.
 pub(crate) fn profile_with(
@@ -286,11 +309,13 @@ pub(crate) fn profile_with(
     }
     let started = Instant::now();
     // asked to close (SIGTERM) at the end, the JVM runs its shutdown hooks and writes the recording
-    let (run, stopped) = util::output_for(
+    let (run, stopped) = util::output_stopping(
         cmd.current_dir(&ctx.root).env(DISABLE_ENV, "1").stdin(Stdio::null()),
         program,
         duration.map(|d| Duration::from_secs_f64(d.ceil() + 2.0)),
         Duration::from_secs(15),
+        "TERM",
+        || recordings_written(&jfr_dir),
     )?;
     let wall = started.elapsed().as_secs_f64();
     ensure!(stopped || run.status.success(), "the app failed ({}):\n{}", run.status, tail(&combined(&run), 30));
