@@ -1415,7 +1415,10 @@ mod tests {
             eprintln!("no C compiler on PATH, skipping");
             return;
         };
-        let dir = std::env::temp_dir().join(format!("fa-c-duration-test-{}", std::process::id()));
+        let tmp = std::env::temp_dir();
+        // macOS's temp folder is behind a symlink; the profile has the real paths
+        let tmp = if cfg!(windows) { tmp } else { tmp.canonicalize().unwrap() };
+        let dir = tmp.join(format!("fa-c-duration-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         // a server's shape: work, forever
         let main = "long work(long n) {\n    long s = 0;\n    for (long i = 0; i < n; i++) s += i * i % 7;\n    return s;\n}\n\nint main(void) {\n    volatile long sink = 0;\n    for (;;) sink += work(20000000);\n}\n";

@@ -637,7 +637,10 @@ mod tests {
             eprintln!("no Rscript on PATH, skipping");
             return;
         }
-        let dir = std::env::temp_dir().join(format!("fa-r-duration-test-{}", std::process::id()));
+        let tmp = std::env::temp_dir();
+        // macOS's temp folder is behind a symlink; the profile has the real paths
+        let tmp = if cfg!(windows) { tmp } else { tmp.canonicalize().unwrap() };
+        let dir = tmp.join(format!("fa-r-duration-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         // a server's shape: some work, then a long blocking wait
         let app = "work <- function(n) {\n  s <- 0\n  for (i in seq_len(n)) s <- s + i * i %% 7\n  s\n}\n\nif (sys.nframe() == 0) {\n  for (k in 1:3) work(400000)\n  Sys.sleep(3600)\n}\n";

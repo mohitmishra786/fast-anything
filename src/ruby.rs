@@ -331,7 +331,10 @@ mod tests {
             eprintln!("no ruby on PATH, skipping");
             return;
         }
-        let dir = std::env::temp_dir().join(format!("fa-ruby-duration-test-{}", std::process::id()));
+        let tmp = std::env::temp_dir();
+        // macOS's temp folder is behind a symlink; the profile has the real paths
+        let tmp = if cfg!(windows) { tmp } else { tmp.canonicalize().unwrap() };
+        let dir = tmp.join(format!("fa-ruby-duration-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         // a server's shape: some work, then a long blocking wait
         let app = "def work(n)\n  (0...n).sum { |i| i * i % 7 }\nend\n\nif __FILE__ == $0\n  3.times { work(200_000) }\n  sleep 3600\nend\n";

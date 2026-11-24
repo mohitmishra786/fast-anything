@@ -529,7 +529,10 @@ mod tests {
             eprintln!("no go on PATH, skipping");
             return;
         }
-        let dir = std::env::temp_dir().join(format!("fa-go-duration-test-{}", std::process::id()));
+        let tmp = std::env::temp_dir();
+        // macOS's temp folder is behind a symlink; the profile has the real paths
+        let tmp = if cfg!(windows) { tmp } else { tmp.canonicalize().unwrap() };
+        let dir = tmp.join(format!("fa-go-duration-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("go.mod"), "module demo\n\ngo 1.22\n").unwrap();
         // a server's shape: work, forever

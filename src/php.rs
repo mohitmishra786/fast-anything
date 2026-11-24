@@ -384,7 +384,10 @@ mod tests {
             eprintln!("no php with pcntl on PATH, skipping");
             return;
         }
-        let dir = std::env::temp_dir().join(format!("fa-php-duration-test-{}", std::process::id()));
+        let tmp = std::env::temp_dir();
+        // macOS's temp folder is behind a symlink; the profile has the real paths
+        let tmp = if cfg!(windows) { tmp } else { tmp.canonicalize().unwrap() };
+        let dir = tmp.join(format!("fa-php-duration-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         // a server's shape: some work, then a long blocking wait
         let app = "<?php\nfunction work(int $n): int\n{\n    $s = 0;\n    for ($i = 0; $i < $n; $i++) $s += $i * $i % 7;\n    return $s;\n}\n\nfor ($k = 0; $k < 3; $k++) work(300000);\nsleep(3600);\n";

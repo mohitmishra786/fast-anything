@@ -142,7 +142,19 @@ impl Lang {
     /// Whether `scan --duration` can stop this language's apps.
     pub fn stops_after_duration(self) -> bool {
         // R: scan interrupts it with SIGINT, which Windows doesn't have
-        matches!(self, Lang::Python | Lang::Node | Lang::Go | Lang::Java | Lang::Kotlin | Lang::Ruby | Lang::Php | Lang::C | Lang::Cpp | Lang::CSharp) || (self == Lang::R && cfg!(unix))
+        matches!(
+            self,
+            Lang::Python
+                | Lang::Node
+                | Lang::Go
+                | Lang::Java
+                | Lang::Kotlin
+                | Lang::Ruby
+                | Lang::Php
+                | Lang::C
+                | Lang::Cpp
+                | Lang::CSharp
+        ) || (self == Lang::R && cfg!(unix))
     }
 
     /// `duration` (see stops_after_duration): stop the app after that many seconds.
