@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
 const RUNNER: &str = include_str!("python/runner.py");
 const HOOK: &str = include_str!("python/sitecustomize.py");
@@ -82,6 +83,18 @@ pub fn resolve(program: &str, root: &Path) -> Result<String> {
 }
 
 fn helper(ctx: &Ctx, python: &str, mode: &str, job: Value, app_args: &[String]) -> Result<Output> {
+    helper_for(ctx, python, mode, job, app_args, None)
+}
+
+/// helper, stopping the run from outside after `limit` (the app may ignore the runner's Ctrl+C).
+fn helper_for(
+    ctx: &Ctx,
+    python: &str,
+    mode: &str,
+    job: Value,
+    app_args: &[String],
+    limit: Option<Duration>,
+) -> Result<Output> {
     let runner = ctx.fast.join("runner.py");
     fs::write(&runner, RUNNER)?;
     let job_path = ctx.fast.join(format!("job-{mode}.json"));
@@ -99,7 +112,13 @@ fn helper(ctx: &Ctx, python: &str, mode: &str, job: Value, app_args: &[String]) 
     if mode != "verify" {
         watch_workers(ctx, &mut cmd, &runner, &job_path, mode)?;
     }
-    let out = output(&mut cmd, "python")?;
+    let (out, killed) = crate::util::output_for(&mut cmd, "python", limit, Duration::from_secs(10))?;
+    if killed {
+        bail!(
+            "the app was still running {}s after --duration: does it stop on Ctrl+C?",
+            limit.unwrap_or_default().as_secs()
+        );
+    }
     if !out.status.success() {
         bail!("the python {mode} run failed ({}):\n{}", out.status, tail(&combined(&out), 30));
     }
@@ -127,9 +146,12 @@ fn watch_workers(ctx: &Ctx, cmd: &mut Command, runner: &Path, job: &Path, mode: 
     Ok(())
 }
 
-pub fn profile(ctx: &Ctx, python: &str, app_args: &[String]) -> Result<Profile> {
+/// `duration`: stop the app after that many seconds (as Ctrl+C would), for servers and GUIs.
+pub fn profile(ctx: &Ctx, python: &str, app_args: &[String], duration: Option<f64>) -> Result<Profile> {
     let out = ctx.fast.join("profile.json");
-    helper(ctx, python, "profile", json!({ "root": ctx.root, "out": out, "max": 40 }), app_args)?;
+    let job = json!({ "root": ctx.root, "out": out, "max": 40, "duration": duration });
+    let limit = duration.map(|d| Duration::from_secs_f64(d + 15.0));
+    helper_for(ctx, python, "profile", job, app_args, limit)?;
     serde_json::from_str(&fs::read_to_string(&out)?).context("reading the profile")
 }
 
@@ -857,6 +879,34 @@ mod tests {
         let on = add_shim("class Text:\n    pass\n", &port, ".fast/lib");
         assert!(on.contains("Text.levenshtein = staticmethod(_fast_anything_load() or Text.levenshtein)"), "{on}");
         assert_eq!(strip_shim(&on, "fuzzy.levenshtein"), "class Text:\n    pass\n");
+    }
+
+    #[test]
+    fn duration_stops_an_app_that_runs_until_closed() {
+        let Some(python) = ["python3", "python"]
+            .into_iter()
+            .find(|p| Command::new(p).arg("--version").output().is_ok_and(|o| o.status.success()))
+        else {
+            eprintln!("no python on PATH, skipping");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("fa-py-duration-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        // a server's shape: some work, then a long blocking wait
+        let app = "import time\n\ndef work(n):\n    return sum(i * i for i in range(n))\n\nif __name__ == '__main__':\n    while True:\n        work(20000)\n        time.sleep(0.05)\n        if work(1) > 0:\n            time.sleep(3600)\n";
+        fs::write(dir.join("app.py"), app.replace("work(1) > 0", "time.time() < 0")).unwrap();
+        fs::write(dir.join("slow.py"), app).unwrap();
+        let ctx = Ctx::open(&dir).unwrap();
+        let started = std::time::Instant::now();
+        let looping = profile(&ctx, python, &["app.py".into()], Some(1.0));
+        let blocked = profile(&ctx, python, &["slow.py".into()], Some(1.0));
+        let took = started.elapsed().as_secs_f64();
+        let _ = fs::remove_dir_all(&dir);
+        for p in [looping.unwrap(), blocked.unwrap()] {
+            assert!(p.functions.iter().any(|f| f.name == "work"), "{:?}", p.functions);
+            assert!((0.9..5.0).contains(&p.wall), "{}", p.wall);
+        }
+        assert!(took < 12.0, "{took}");
     }
 
     #[test]

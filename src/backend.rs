@@ -139,16 +139,22 @@ impl Lang {
         }
     }
 
-    pub fn profile(self, ctx: &Ctx, exe: &str, args: &[String]) -> Result<Profile> {
+    /// Whether `scan --duration` can stop this language's apps.
+    pub fn stops_after_duration(self) -> bool {
+        matches!(self, Lang::Python | Lang::CSharp)
+    }
+
+    /// `duration` (see stops_after_duration): stop the app after that many seconds.
+    pub fn profile(self, ctx: &Ctx, exe: &str, args: &[String], duration: Option<f64>) -> Result<Profile> {
         match self {
-            Lang::Python => python::profile(ctx, exe, args),
+            Lang::Python => python::profile(ctx, exe, args, duration),
             Lang::Node => node::profile(ctx, exe, args),
             Lang::Ruby => ruby::profile(ctx, exe, args),
             Lang::Java => java::profile(ctx, exe, args),
             Lang::Go => golang::profile(ctx, exe, args),
             Lang::Php => php::profile(ctx, exe, args),
             Lang::C | Lang::Cpp => cfamily::profile(ctx, exe, args, self),
-            Lang::CSharp => csharp::profile(ctx, exe, args, None),
+            Lang::CSharp => csharp::profile(ctx, exe, args, duration),
             Lang::R => r::profile(ctx, exe, args),
             Lang::Kotlin => kotlin::profile(ctx, exe, args),
         }

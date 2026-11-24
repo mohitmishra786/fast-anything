@@ -235,6 +235,30 @@ def prepare_path(kind, target):
     return entry, base
 
 
+def stop_after(seconds):
+    """Interrupt the app after `seconds`, like Ctrl+C would: for servers and GUIs that run until
+    closed. Returns a function telling whether it did."""
+    import threading
+
+    fired = []
+
+    def fire():
+        fired.append(True)
+        if os.name == "nt":
+            import _thread
+
+            _thread.interrupt_main()
+        else:
+            import signal
+
+            os.kill(os.getpid(), signal.SIGINT)  # wakes a main thread blocked in a system call
+
+    timer = threading.Timer(seconds, fire)
+    timer.daemon = True
+    timer.start()
+    return lambda: timer.cancel() or bool(fired)
+
+
 def run_target(kind, target, rest):
     sys.argv = [target] + list(rest)
     try:
@@ -688,12 +712,18 @@ def cmd_profile(job, argv):
     root = job["root"]
     prof = cProfile.Profile()
     sys.modules["_fast_anything_state"] = ChildState("profile", os.environ.get("FAST_ANYTHING_CHILDREN", ""))
+    stopped = stop_after(job["duration"]) if job.get("duration") else None
     start = time.perf_counter()
     prof.enable()
     try:
         run_target(kind, target, rest)
+    except (KeyboardInterrupt, SystemExit):
+        if not (stopped and stopped()):
+            raise  # the app's own, not the one --duration sent
     finally:
         prof.disable()
+        if stopped:
+            stopped()
     wall = time.perf_counter() - start
     del sys.modules["_fast_anything_state"]
 
