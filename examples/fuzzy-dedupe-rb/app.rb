@@ -21,7 +21,7 @@ end
 
 if __FILE__ == $0
   names = make_names(400)
-  pairs = Fuzzy.find_duplicates(names)
+  pairs = Fuzzy.find_duplicates(*names)
   puts "#{names.length} names, #{pairs.length} likely duplicate pairs"
   pairs.reject { |i, j| names[i] == names[j] }.first(5).each { |i, j| puts "  #{names[i]} ~ #{names[j]}" }
 end

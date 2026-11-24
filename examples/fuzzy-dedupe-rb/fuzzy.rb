@@ -2,6 +2,8 @@
 
 # Fuzzy string matching helpers.
 module Fuzzy
+  MAX_DISTANCE = 2
+
   # Edit distance: how many inserts, deletes or substitutions turn a into b.
   def self.levenshtein(a, b)
     a, b = b, a if a.length < b.length
@@ -21,7 +23,7 @@ module Fuzzy
   end
 
   # Index pairs of names within max_distance edits of each other.
-  def self.find_duplicates(names, max_distance = 2)
+  def self.find_duplicates(*names, max_distance: MAX_DISTANCE)
     clean = names.map { |n| normalize(n) }
     pairs = []
     clean.each_index do |i|
