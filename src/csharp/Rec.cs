@@ -104,14 +104,18 @@ static class FastAnythingRec
         return t.IsGenericType ? t.GetGenericArguments()[^1] : typeof(object);
     }
 
-    // Special values for one argument: zero and ±1, -0.0, non-ASCII text, empty collections.
+    // Special values for one argument: zero and ±1, -0.0, NaN and ±infinity, non-ASCII text, empty collections.
     static IEnumerable<JsonNode?> Edges(JsonNode? v, Type t)
     {
         var u = Nullable.GetUnderlyingType(t) ?? t;
         if (u == typeof(string)) foreach (var s in Texts) yield return JsonValue.Create(s);
         else if (u == typeof(char)) foreach (var s in new[] { "a", "é", "日", " " }) yield return JsonValue.Create(s);
         else if (u == typeof(bool)) { yield return JsonValue.Create(true); yield return JsonValue.Create(false); }
-        else if (u == typeof(double) || u == typeof(float)) foreach (var d in new[] { 0.0, -0.0, 1.0, -1.0, 0.5 }) yield return JsonValue.Create(d);
+        else if (u == typeof(double) || u == typeof(float))
+        {
+            foreach (var d in new[] { 0.0, -0.0, 1.0, -1.0, 0.5 }) yield return JsonValue.Create(d);
+            foreach (var name in new[] { "NaN", "Infinity", "-Infinity" }) yield return new JsonObject { ["$float"] = name };
+        }
         else if (u.IsPrimitive) foreach (var i in new[] { 0, 1, -1 }) yield return JsonValue.Create(i);
         else if (v is JsonArray arr)
         {

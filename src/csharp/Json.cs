@@ -12,7 +12,54 @@
         {
             var o = new JsonSerializerOptions();
             o.Converters.Add(new BytesAsNumbers());
+            o.Converters.Add(new DoubleTags());
+            o.Converters.Add(new FloatTags());
             return o;
+        }
+
+        // NaN and infinity travel as {"$float": name}: JSON has no numbers for them
+        static string FloatName(double d) => double.IsNaN(d) ? "NaN" : d > 0 ? "Infinity" : "-Infinity";
+
+        static double ReadDouble(ref Utf8JsonReader r)
+        {
+            if (r.TokenType == JsonTokenType.Number) return r.GetDouble();
+            if (r.TokenType == JsonTokenType.StartObject && r.Read() && r.TokenType == JsonTokenType.PropertyName
+                && r.GetString() == "$float" && r.Read() && r.TokenType == JsonTokenType.String)
+            {
+                double d = r.GetString() switch
+                {
+                    "NaN" => double.NaN,
+                    "Infinity" => double.PositiveInfinity,
+                    "-Infinity" => double.NegativeInfinity,
+                    _ => throw new JsonException("not a number"),
+                };
+                if (r.Read() && r.TokenType == JsonTokenType.EndObject) return d;
+            }
+            throw new JsonException("not a number");
+        }
+
+        static void WriteDouble(Utf8JsonWriter w, double d, Action<Utf8JsonWriter> finite)
+        {
+            if (double.IsFinite(d))
+            {
+                finite(w);
+                return;
+            }
+            w.WriteStartObject();
+            w.WriteString("$float", FloatName(d));
+            w.WriteEndObject();
+        }
+
+        sealed class DoubleTags : JsonConverter<double>
+        {
+            public override double Read(ref Utf8JsonReader r, Type t, JsonSerializerOptions o) => ReadDouble(ref r);
+            public override void Write(Utf8JsonWriter w, double v, JsonSerializerOptions o) => WriteDouble(w, v, x => x.WriteNumberValue(v));
+        }
+
+        sealed class FloatTags : JsonConverter<float>
+        {
+            public override float Read(ref Utf8JsonReader r, Type t, JsonSerializerOptions o) => (float)ReadDouble(ref r);
+            public override void Write(Utf8JsonWriter w, float v, JsonSerializerOptions o) => WriteDouble(w, v, x => x.WriteNumberValue(v));
         }
 
         // byte[] travels as a list of numbers, like every other array (System.Text.Json would use base64)
@@ -62,12 +109,12 @@
                     b.Append(((IFormattable)v).ToString(null, inv));
                     break;
                 case double d:
-                    if (!double.IsFinite(d)) throw new Unsupported("NaN or Infinity");
-                    Number(d.ToString("R", inv), b);
+                    if (!double.IsFinite(d)) b.Append("{\"$float\":\"").Append(FloatName(d)).Append("\"}");
+                    else Number(d.ToString("R", inv), b);
                     break;
                 case float f:
-                    if (!float.IsFinite(f)) throw new Unsupported("NaN or Infinity");
-                    Number(f.ToString("R", inv), b);
+                    if (!float.IsFinite(f)) b.Append("{\"$float\":\"").Append(FloatName(f)).Append("\"}");
+                    else Number(f.ToString("R", inv), b);
                     break;
                 case IDictionary m:
                 {

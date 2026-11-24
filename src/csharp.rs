@@ -650,7 +650,7 @@ pub const FLAVOR: Flavor = Flavor {
         "`ToLowerInvariant` maps one UTF-16 unit at a time; Rust's `to_lowercase` can differ on a few characters (İ, final sigma). `Split((char[]?)null)` splits on Unicode whitespace, like `split_whitespace`.",
         "Arrays and lists arrive as JSON arrays, dictionaries as objects with string keys.",
     ],
-    floats: None,
+    floats: Some(native::FLOATS),
 };
 
 pub fn scaffold(ctx: &Ctx, hs: &Hotspot, helpers: &[Hotspot], port: &Port) -> Result<String> {
@@ -711,6 +711,54 @@ pub fn disable(ctx: &Ctx, port: &Port) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_carries_nan_and_infinity() {
+        let Some(version) = Command::new("dotnet").arg("--version").output().ok().filter(|o| o.status.success()) else {
+            eprintln!("no dotnet on PATH, skipping");
+            return;
+        };
+        let major = String::from_utf8_lossy(&version.stdout).split('.').next().unwrap_or("8").trim().to_string();
+        let dir = std::env::temp_dir().join(format!("fa-cs-json-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("Check.csproj"),
+            format!("<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net{major}.0</TargetFramework><Nullable>enable</Nullable></PropertyGroup></Project>"),
+        )
+        .unwrap();
+        let usings = "using System;\nusing System.Collections;\nusing System.Collections.Generic;\nusing System.Globalization;\nusing System.Text;\nusing System.Text.Json;\nusing System.Text.Json.Nodes;\nusing System.Text.Json.Serialization;\n";
+        fs::write(dir.join("Json.cs"), format!("{usings}static class Holder\n{{\n{JSON}\n}}\n")).unwrap();
+        let check = r#"using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+var inv = CultureInfo.InvariantCulture;
+Console.WriteLine(Holder.Json.Enc(new object?[] { double.NaN, -0.5, float.PositiveInfinity, new[] { 1.0, double.NegativeInfinity } }));
+var d = (double[])Holder.Json.Dec(JsonNode.Parse("""[1.5,{"$float":"NaN"},{"$float":"-Infinity"}]"""), typeof(double[]))!;
+Console.WriteLine($"{d[0].ToString(inv)} {double.IsNaN(d[1])} {double.IsNegativeInfinity(d[2])}");
+Console.WriteLine(float.IsPositiveInfinity((float)Holder.Json.Dec(JsonNode.Parse("""{"$float":"Infinity"}"""), typeof(float))!));
+var m = JsonSerializer.Deserialize<Dictionary<string, double?>>("""{"a":{"$float":"NaN"},"b":null}""", Holder.Json.Options)!;
+Console.WriteLine($"{double.IsNaN(m["a"]!.Value)} {m["b"] is null}");
+Console.WriteLine(JsonSerializer.Serialize(new[] { double.PositiveInfinity, 2.5 }, Holder.Json.Options));
+try { Holder.Json.Dec(JsonNode.Parse("""{"$float":"nan"}"""), typeof(double)); Console.WriteLine("no error"); }
+catch (JsonException) { Console.WriteLine("error"); }
+"#;
+        fs::write(dir.join("Program.cs"), check).unwrap();
+        let run = Command::new("dotnet").args(["run", "--nologo"]).current_dir(&dir).output().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            run.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"),
+            "[{\"$float\":\"NaN\"},-0.5,{\"$float\":\"Infinity\"},[1.0,{\"$float\":\"-Infinity\"}]]\n\
+             1.5 True True\nTrue\nTrue True\n[{\"$float\":\"Infinity\"},2.5]\nerror\n"
+        );
+    }
 
     #[test]
     fn csharp_bits() {
