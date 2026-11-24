@@ -20,13 +20,10 @@ fun levenshtein(a: String, b: String): Int {
 fun normalize(name: String): String = name.lowercase().split(' ', '\t', '\n', '\r').filter { it.isNotEmpty() }.joinToString(" ")
 
 /** Index pairs of names within maxDistance edits of each other. */
-fun findDuplicates(names: List<String>, maxDistance: Int = 2): List<List<Int>> {
-    val clean = names.map { normalize(it) }
-    val pairs = mutableListOf<List<Int>>()
-    for (i in clean.indices) {
-        for (j in i + 1 until clean.size) {
-            if (levenshtein(clean[i], clean[j]) <= maxDistance) pairs.add(listOf(i, j))
+fun findDuplicates(names: List<String>, maxDistance: Int = 2): List<List<Int>> =
+    names.map { normalize(it) }
+        .let { clean ->
+            clean.indices.flatMap { i ->
+                (i + 1 until clean.size).filter { j -> levenshtein(clean[i], clean[j]) <= maxDistance }.map { j -> listOf(i, j) }
+            }
         }
-    }
-    return pairs
-}
