@@ -5,9 +5,15 @@ import (
 	"expvar"
 	"os"
 	"runtime/pprof"
+	"strconv"
+	"sync"
+	"time"
 )
 
-var fastAnythingProfFile *os.File
+var (
+	fastAnythingProfFile *os.File
+	fastAnythingDoneOnce sync.Once
+)
 
 func init() {
 	if path := os.Getenv("FAST_ANYTHING_PPROF"); path != "" {
@@ -15,16 +21,25 @@ func init() {
 			fastAnythingProfFile = f
 		}
 	}
+	// scan --duration: a server or GUI runs until closed, so end it after that long, profile saved
+	if ms, err := strconv.Atoi(os.Getenv("FAST_ANYTHING_STOP_AFTER_MS")); err == nil && ms > 0 {
+		time.AfterFunc(time.Duration(ms)*time.Millisecond, func() {
+			fastAnythingDone()
+			os.Exit(0)
+		})
+	}
 }
 
 // Deferred at the top of main: stops the profile and saves recordings when main returns.
 func fastAnythingDone() {
-	if fastAnythingProfFile != nil {
-		pprof.StopCPUProfile()
-		fastAnythingProfFile.Close()
-		fastAnythingProfFile = nil
-	}
-	if save, ok := expvar.Get("fast_anything_save").(expvar.Func); ok {
-		save()
-	}
+	fastAnythingDoneOnce.Do(func() {
+		if fastAnythingProfFile != nil {
+			pprof.StopCPUProfile()
+			fastAnythingProfFile.Close()
+			fastAnythingProfFile = nil
+		}
+		if save, ok := expvar.Get("fast_anything_save").(expvar.Func); ok {
+			save()
+		}
+	})
 }

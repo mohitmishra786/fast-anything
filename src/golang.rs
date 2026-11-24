@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const DESCRIBE: &str = include_str!("golang/describe.go");
 const REC: &str = include_str!("golang/rec.go");
@@ -295,7 +295,8 @@ fn parse_top(text: &str) -> HashMap<String, (f64, f64)> {
     out
 }
 
-pub fn profile(ctx: &Ctx, go: &str, args: &[String]) -> Result<Profile> {
+/// `duration`: end the app after that many seconds (servers and GUIs that run until closed).
+pub fn profile(ctx: &Ctx, go: &str, args: &[String], duration: Option<f64>) -> Result<Profile> {
     let run = GoRun::parse(args)?;
     let funcs = describe(ctx, go)?;
     let (mut patches, extra) = instrument(ctx, &funcs, &run, vec![])?;
@@ -305,16 +306,22 @@ pub fn profile(ctx: &Ctx, go: &str, args: &[String]) -> Result<Profile> {
     let pprof = ctx.fast.join("cpu.pprof");
     let _ = fs::remove_file(&pprof);
     let started = Instant::now();
-    let out = output(
-        Command::new(&bin)
-            .args(&run.args)
+    let mut cmd = Command::new(&bin);
+    if let Some(d) = duration {
+        cmd.env("FAST_ANYTHING_STOP_AFTER_MS", ((d * 1000.0) as u64).to_string());
+    }
+    let (out, killed) = util::output_for(
+        cmd.args(&run.args)
             .current_dir(&ctx.root)
             .env("FAST_ANYTHING_PPROF", &pprof)
             .env(DISABLE_ENV, "1")
             .stdin(Stdio::null()),
         "the app",
+        duration.map(|d| Duration::from_secs_f64(d + 15.0)),
+        Duration::from_secs(10),
     )?;
     let wall = started.elapsed().as_secs_f64();
+    ensure!(!killed, "the app was still running 15s after --duration");
     ensure!(out.status.success(), "the app failed ({}):\n{}", out.status, tail(&combined(&out), 30));
     ensure!(pprof.exists(), "no profile was written: does main return normally (no os.Exit)?");
     let top = output(
@@ -515,6 +522,30 @@ pub fn disable(ctx: &Ctx, port: &Port) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duration_ends_an_app_that_runs_until_closed() {
+        if !Command::new("go").arg("version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no go on PATH, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("fa-go-duration-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("go.mod"), "module demo\n\ngo 1.22\n").unwrap();
+        // a server's shape: work, forever
+        let work = "package main\n\nfunc work(n int) int {\n\ts := 0\n\tfor i := 0; i < n; i++ {\n\t\ts += i * i % 7\n\t}\n\treturn s\n}\n";
+        let main = "package main\n\nimport \"time\"\n\nvar sink int\n\nfunc main() {\n\tfor {\n\t\tsink += work(5000000)\n\t\ttime.Sleep(time.Millisecond)\n\t}\n}\n";
+        fs::write(dir.join("work.go"), work).unwrap();
+        fs::write(dir.join("main.go"), main).unwrap();
+        let ctx = Ctx::open(&dir).unwrap();
+        let p = profile(&ctx, "go", &["run".into(), ".".into()], Some(1.5));
+        let after = fs::read_to_string(dir.join("main.go")).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        let p = p.unwrap();
+        assert!(p.functions.iter().any(|f| f.name == "work" && f.cumtime > 0.0), "{:?}", p.functions);
+        assert!((1.0..12.0).contains(&p.wall), "{}", p.wall);
+        assert_eq!(after, main);
+    }
 
     #[test]
     fn go_commands_and_profiles() {
