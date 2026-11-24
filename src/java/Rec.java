@@ -119,17 +119,149 @@ final class FastAnythingRec {
         return out;
     }
 
+    // an accent, CJK, an emoji with a modifier, a combining mark
+    static final String[] NON_ASCII = {"\u00e9", "\u65e5\u672c", "\ud83d\udc4d\ud83c\udffd", "e\u0301"};
+
+    // Inputs where ports and originals tend to part ways, of the same type as the recorded value.
+    static java.util.List<Object> edges(Object v) {
+        java.util.List<Object> out = new java.util.ArrayList<>();
+        if (v instanceof Integer || v instanceof Long || v instanceof Short || v instanceof Byte) {
+            for (long x : new long[] {0, 1, -1}) {
+                Object e = v instanceof Integer ? (Object) (int) x : v instanceof Long ? (Object) x
+                    : v instanceof Short ? (Object) (short) x : (Object) (byte) x;
+                if (!e.equals(v)) out.add(e);
+            }
+        } else if (v instanceof Double d) {
+            for (double x : new double[] {0, 1, -1, 1e300, Double.MIN_VALUE}) if (x != d) out.add(x);
+        } else if (v instanceof Float f) {
+            for (float x : new float[] {0, 1, -1, 1e30f, Float.MIN_VALUE}) if (x != f) out.add(x);
+        } else if (v instanceof String s) {
+            int mid = s.offsetByCodePoints(0, s.codePointCount(0, s.length()) / 2);
+            for (String x : new String[] {s.substring(0, mid) + NON_ASCII[0] + s.substring(mid), s + NON_ASCII[1], NON_ASCII[2] + s, s + NON_ASCII[3], ""}) {
+                if (!x.equals(s)) out.add(x);
+            }
+        } else if (v != null && v.getClass().isArray()) {
+            if (java.lang.reflect.Array.getLength(v) == 0) return out;
+            out.add(java.lang.reflect.Array.newInstance(v.getClass().getComponentType(), 0));
+            for (Object e : edges(java.lang.reflect.Array.get(v, 0)).stream().limit(4).toList()) {
+                Object c = deepCopy(v);
+                java.lang.reflect.Array.set(c, 0, e);
+                out.add(c);
+            }
+        } else if (v instanceof java.util.List<?> l) {
+            if (l.isEmpty()) return out;
+            out.add(v instanceof java.util.LinkedList ? new java.util.LinkedList<>() : new java.util.ArrayList<>());
+            for (Object e : edges(l.get(0)).stream().limit(4).toList()) {
+                @SuppressWarnings("unchecked")
+                java.util.List<Object> c = (java.util.List<Object>) deepCopy(l);
+                c.set(0, e);
+                out.add(c);
+            }
+        }
+        return out;
+    }
+
+    // A short version of a recorded value, so edge cases stay cheap when the real inputs are big.
+    static Object small(Object v) {
+        if (v instanceof String s && s.codePointCount(0, s.length()) > 64) return s.substring(0, s.offsetByCodePoints(0, 64));
+        if (v != null && v.getClass().isArray() && java.lang.reflect.Array.getLength(v) > 8) {
+            Object c = java.lang.reflect.Array.newInstance(v.getClass().getComponentType(), 8);
+            System.arraycopy(v, 0, c, 0, 8);
+            return deepCopy(c);
+        }
+        if (v instanceof java.util.List<?> l && l.size() > 8) return deepCopy(new java.util.ArrayList<>(l.subList(0, 8)));
+        return v;
+    }
+
+    // The value repeated factor times (null past 4096 items or characters).
+    static Object bigger(Object v, int factor) {
+        if (v instanceof String s) {
+            int n = s.codePointCount(0, s.length());
+            return n == 0 || n * factor > 4096 ? null : s.repeat(factor);
+        }
+        if (v != null && v.getClass().isArray()) {
+            int n = java.lang.reflect.Array.getLength(v);
+            if (n == 0 || n * factor > 4096) return null;
+            Object c = java.lang.reflect.Array.newInstance(v.getClass().getComponentType(), n * factor);
+            for (int k = 0; k < factor; k++) System.arraycopy(deepCopy(v), 0, c, k * n, n);
+            return c;
+        }
+        if (v instanceof java.util.List<?> l) {
+            if (l.isEmpty() || l.size() * factor > 4096) return null;
+            java.util.List<Object> c = new java.util.ArrayList<>(l.size() * factor);
+            for (int k = 0; k < factor; k++) c.addAll((java.util.List<?>) deepCopy(l));
+            return c;
+        }
+        return null;
+    }
+
+    // How long the original took on args, or -1 if it threw (outside its domain: not a fair test).
+    static long attempt(Object[] args, java.util.List<String> derived, java.util.Set<String> seen, String tag) {
+        try {
+            String a = Json.enc(args);
+            if (!seen.add(a)) return -1;
+            long t = System.nanoTime();
+            Object r = fn.apply((Object[]) deepCopy(args));
+            long took = System.nanoTime() - t;
+            derived.add("{\"args\":" + a + ",\"result\":" + Json.enc(r) + ",\"derived\":" + tag + "}");
+            return took;
+        } catch (Throwable e) {
+            return -1;
+        }
+    }
+
     static synchronized void save() {
         inside = true;
         java.util.List<String> derived = new java.util.ArrayList<>();
         java.util.Set<String> seen = new java.util.HashSet<>();
+        // Edge cases first, from a sample of recorded calls: special numbers, non-ASCII text, empty and
+        // much bigger inputs. The original answers them; inputs it throws on are skipped.
         long start = System.nanoTime();
+        java.util.function.LongSupplier edgeLeft = () -> 1_500_000_000L - (System.nanoTime() - start);
+        java.util.Set<Integer> grown = new java.util.HashSet<>();
+        int sampled = 0;
+        sampling:
+        for (Object[] args : keptArgs) {
+            if (args == null || fn == null) continue;
+            if (++sampled > 20) break;
+            Object[] base = new Object[args.length];
+            for (int i = 0; i < args.length; i++) base[i] = small(args[i]);
+            for (int i = 0; i < args.length; i++) {
+                for (Object e : edges(base[i])) {
+                    if (derived.size() >= 100 || edgeLeft.getAsLong() <= 0) break sampling;
+                    Object[] next = (Object[]) deepCopy(base);
+                    next[i] = e;
+                    attempt(next, derived, seen, "\"edge\"");
+                }
+                if (grown.contains(i) || bigger(base[i], 4) == null) continue;
+                // much bigger inputs, only while their time (assumed quadratic) fits the budget
+                grown.add(i);
+                long took;
+                try {
+                    long t = System.nanoTime();
+                    fn.apply((Object[]) deepCopy(base));
+                    took = System.nanoTime() - t;
+                } catch (Throwable e) {
+                    continue;
+                }
+                // 4x bigger each step, from the short version of the input, up to 4096 items or characters
+                for (int factor : new int[] {4, 16, 64, 256, 512}) {
+                    Object big = bigger(base[i], factor);
+                    if (big == null || derived.size() >= 100 || took * 16 > edgeLeft.getAsLong() / 2) break;
+                    Object[] next = (Object[]) deepCopy(base);
+                    next[i] = big;
+                    if ((took = attempt(next, derived, seen, "\"edge\"")) < 0) break;
+                }
+            }
+        }
+        int edgeCount = derived.size();
+        long derivedStart = System.nanoTime();
         outer:
         for (Object[] args : keptArgs) {
             if (args == null || fn == null) continue;
             for (int i = 0; i < args.length; i++) {
                 for (Object smaller : variants(args[i])) {
-                    if (derived.size() >= 200 || System.nanoTime() - start > 3_000_000_000L) break outer;
+                    if (derived.size() >= 200 + edgeCount || System.nanoTime() - derivedStart > 3_000_000_000L) break outer;
                     Object[] next = (Object[]) deepCopy(args);
                     next[i] = smaller;
                     try {

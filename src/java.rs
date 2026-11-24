@@ -581,6 +581,63 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_recorder_adds_edge_cases() {
+        use serde_json::json;
+        let has = |cmd: &str| Command::new(cmd).arg("-version").output().is_ok_and(|o| o.status.success());
+        if !has("java") {
+            eprintln!("no java on PATH, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("fa-java-edges-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let rec = REC.replace("/*PACKAGE*/", "").replace("/*ID*/", "Check.width").replace("/*JSON*/", JSON);
+        fs::write(dir.join("FastAnythingRec.java"), rec).unwrap();
+        // width throws on an emoji: inputs it throws on aren't fair tests and must be left out
+        let check = r#"
+            public class Check {
+                static int width(String s, int[] xs) {
+                    if (s.indexOf(0x1F44D) >= 0) throw new IllegalArgumentException("emoji");
+                    return s.codePointCount(0, s.length()) + xs.length;
+                }
+                public static void main(String[] a) {
+                    String s = "word ".repeat(40);
+                    for (int k = 0; k < 3; k++) {
+                        int[] xs = new int[20 + k];
+                        FastAnythingRec.record(new Object[] {s, xs}, args -> width((String) args[0], (int[]) args[1]));
+                    }
+                }
+            }
+        "#;
+        fs::write(dir.join("Check.java"), check).unwrap();
+        let out = dir.join("rec.jsonl");
+        let run = Command::new("java")
+            .arg("Check.java")
+            .current_dir(&dir)
+            .env("FAST_ANYTHING_RECORD_OUT", &out)
+            .env("FAST_ANYTHING_RECORD_META", dir.join("meta.json"))
+            .output()
+            .unwrap();
+        let text = fs::read_to_string(&out).unwrap_or_default();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+        let edges: Vec<Value> = text
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .filter(|c| c["derived"] == "edge")
+            .collect();
+        let has_arg = |want: &Value, i: usize| edges.iter().any(|c| &c["args"][i] == want);
+        assert!(has_arg(&json!(""), 0) && has_arg(&json!([]), 1), "empty inputs: {text}");
+        // non-ASCII text, added to the short version of the recorded input (64 characters, 8 items)
+        let short: String = "word ".repeat(40).chars().take(64).collect();
+        assert!(has_arg(&json!(format!("{short}\u{65e5}\u{672c}")), 0), "{text}");
+        assert!(!text.contains('\u{1f44d}'), "an input the original throws on");
+        assert!(edges.iter().any(|c| c["args"][1].as_array().is_some_and(|a| a.len() == 8 * 16)), "bigger arrays");
+        assert!(edges.iter().any(|c| c["args"][1][0] == json!(-1)), "special numbers in arrays");
+        assert!(edges.iter().all(|c| c["result"].is_i64()), "every edge has the original's answer");
+        assert!(edges.len() <= 100);
+    }
+
+    #[test]
     fn java_types_map_to_rust() {
         assert_eq!(rust_type("int[][]").as_deref(), Some("Vec<Vec<i32>>"));
         assert_eq!(rust_type("List<String>").as_deref(), Some("Vec<String>"));
