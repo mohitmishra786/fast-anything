@@ -105,9 +105,16 @@ def describe(path, line, name, entry, root)
 
   params = []
   if (ps = node.parameters)
-    blockers << "takes keyword, block or splat arguments" if ps.keywords.any? || ps.keyword_rest || ps.block || ps.rest || ps.posts.any?
-    ps.requireds.each { |r| params << { "name" => r.respond_to?(:name) ? r.name.to_s : r.slice, "annotation" => nil, "default" => nil } }
-    ps.optionals.each { |o| params << { "name" => o.name.to_s, "annotation" => nil, "default" => o.value.slice } }
+    blockers << "takes a block, **options or ... arguments" if ps.keyword_rest || ps.block
+    blockers << "takes an unnamed * argument" if ps.rest && !(ps.rest.respond_to?(:name) && ps.rest.name)
+    blockers << "takes a destructured argument" if (ps.requireds + ps.posts).any? { |r| !r.respond_to?(:name) }
+    param = ->(name, default = nil, extra = {}) { { "name" => name.to_s, "annotation" => nil, "default" => default }.merge(extra) }
+    ps.requireds.each { |r| params << param.call(r.respond_to?(:name) ? r.name : r.slice) }
+    ps.optionals.each { |o| params << param.call(o.name, o.value.slice) }
+    # *rest is one array; keywords are passed by name
+    params << param.call(ps.rest.name, nil, "splat" => true) if ps.rest.respond_to?(:name) && ps.rest.name
+    ps.posts.each { |r| params << param.call(r.respond_to?(:name) ? r.name : r.slice) }
+    ps.keywords.each { |k| params << param.call(k.name, k.respond_to?(:value) ? k.value.slice : nil, "kwonly" => true) }
   end
 
   siblings = info[:defs].select { |x| x[:owner] == d[:owner] && x[:kind] != "nested" }.map { |x| x[:node].name }
@@ -390,7 +397,7 @@ def cmd_verify(job, _argv)
   receiver = job["owner"] == "Object" ? Object.new : Object.const_get(job["owner"].delete_suffix(".singleton_class"))
   owner = job["owner"] == "Object" ? Object : receiver.singleton_class
   method = owner.instance_method(job["func"])
-  original = ->(*args) { method.bind_call(receiver, *args) }
+  original = ->(*args) { FastAnything.invoke(method, receiver, args) }
 
   cases = File.readlines(job["cases"], chomp: true).reject(&:empty?).map { |l| JSON.parse(l) }
   recorded = cases.length

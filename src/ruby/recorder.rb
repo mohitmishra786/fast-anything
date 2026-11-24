@@ -53,6 +53,21 @@ module FastAnything
 
     a.class == b.class && a == b
   end
+
+  # Calls the method with the values of its parameters in order ([a, b, xs, scale] for
+  # a, b = 2, *xs, scale: 1): *rest spread out again, keywords by name.
+  def invoke(method, receiver, values, blk = nil)
+    positional = []
+    keywords = {}
+    method.parameters.reject { |kind, _| %i[keyrest block nokey].include?(kind) }.zip(values) do |(kind, name), value|
+      case kind
+      when :rest then positional.concat(value)
+      when :key, :keyreq then keywords[name] = value
+      else positional << value
+      end
+    end
+    method.bind_call(receiver, *positional, **keywords, &blk)
+  end
 end
 
 if ENV["FAST_ANYTHING_RECORD_OUT"]
@@ -88,7 +103,7 @@ if ENV["FAST_ANYTHING_RECORD_OUT"]
           end
         end
         begin
-          result = original.bind_call(receiver, *args, &blk)
+          result = invoke(original, receiver, args, blk)
         rescue StandardError => e
           if c
             c["raises"] = e.class.name
@@ -120,10 +135,14 @@ if ENV["FAST_ANYTHING_RECORD_OUT"]
     end
   end
 
-  $__fast_anything_wrap = lambda do |owner, name|
+  # bind: a lambda with the method's own parameters that returns their values, so arguments
+  # (defaults, *rest, keywords) are bound the way the method binds them
+  $__fast_anything_wrap = lambda do |owner, name, bind|
     original = owner.instance_method(name)
     was_private = owner.private_method_defined?(name)
-    owner.send(:define_method, name) { |*args, &blk| FastAnything.record(original, self, args, blk) }
+    owner.send(:define_method, name) do |*args, **kw, &blk|
+      FastAnything.record(original, self, instance_exec(*args, **kw, &bind), blk)
+    end
     owner.send(:private, name) if was_private
   end
 

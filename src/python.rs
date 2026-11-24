@@ -1100,6 +1100,7 @@ sys.exit(1 if fails else 0)
             annotation: Some(annotation.into()),
             default: default.map(Into::into),
             kwonly,
+            splat: false,
         };
         let mut hs = Hotspot {
             name: "join_words".into(),

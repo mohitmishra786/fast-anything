@@ -382,7 +382,7 @@ fn parse_params(list: &str) -> Vec<Param> {
             let (ty, name) = (decl[..name_start].trim(), &decl[name_start..]);
             let (ty, name) = if ty.is_empty() || ty.ends_with("::") { (decl, "") } else { (ty, name) };
             let ty = if array { format!("{}*", ty.trim()) } else { ty.to_string() };
-            Param { name: name.to_string(), annotation: Some(squash(&ty)), default, kwonly: false }
+            Param { name: name.to_string(), annotation: Some(squash(&ty)), default, kwonly: false, splat: false }
         })
         .collect()
 }

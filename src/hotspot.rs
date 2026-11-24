@@ -12,8 +12,10 @@ pub struct Param {
     pub annotation: Option<String>,
     /// Default value as source text, e.g. "2" or "None".
     pub default: Option<String>,
-    /// Keyword-only (after `*` in Python).
+    /// Keyword-only (after `*` in Python; Ruby's keyword arguments).
     pub kwonly: bool,
+    /// Takes the remaining positional arguments, as one array (Ruby's `*rest`).
+    pub splat: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

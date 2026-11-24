@@ -3,7 +3,7 @@
 //! The same bridge works for any language that can call C.
 
 use crate::backend::{self, Profile, Recording};
-use crate::hotspot::Hotspot;
+use crate::hotspot::{Hotspot, Param};
 use crate::native::{cargo_toml, snake};
 use crate::python::DISABLE_ENV;
 use crate::state::{Ctx, Port, Verify};
@@ -72,6 +72,26 @@ fn owner(hs_owner: Option<&str>) -> &str {
     hs_owner.unwrap_or("Object")
 }
 
+/// Ruby source for a lambda that takes the method's parameters (`a, b = 2, *xs, scale: 1`) and
+/// returns their values in order (`[a, b, xs, scale]`): run with instance_exec, it binds a call's
+/// arguments the way the method does. Made in the method's module, so defaults see its constants.
+fn binder(hs_owner: Option<&str>, params: &[Param]) -> String {
+    let list: Vec<String> = params
+        .iter()
+        .map(|p| match (&p.default, p.kwonly, p.splat) {
+            (_, _, true) => format!("*{}", p.name),
+            (Some(d), true, _) => format!("{}: {d}", p.name),
+            (None, true, _) => format!("{}:", p.name),
+            (Some(d), false, _) => format!("{} = {d}", p.name),
+            (None, false, _) => p.name.clone(),
+        })
+        .collect();
+    let names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
+    let code = format!("->({}) {{ [{}] }}", list.join(", "), names.join(", "));
+    let base = owner(hs_owner).trim_end_matches(".singleton_class");
+    format!("{base}.class_eval('{}')", code.replace('\\', "\\\\").replace('\'', "\\'"))
+}
+
 /// Wrap the method for one run: a line appended to its file (or put before the entry script's
 /// "if __FILE__ == $0" block) hands it to the preloaded recorder. The file is restored afterwards.
 pub fn record(ctx: &Ctx, ruby: &str, args: &[String], hs: &Hotspot, out: &Path, limit: usize) -> Result<Recording> {
@@ -81,7 +101,12 @@ pub fn record(ctx: &Ctx, ruby: &str, args: &[String], hs: &Hotspot, out: &Path, 
     fs::create_dir_all(&backup_dir)?;
     let backup = backup_dir.join(slug(&hs.file));
     fs::write(&backup, &original)?;
-    let line = format!("$__fast_anything_wrap&.call({}, :{})", owner(hs.owner.as_deref()), hs.name);
+    let line = format!(
+        "$__fast_anything_wrap&.call({}, :{}, {})",
+        owner(hs.owner.as_deref()),
+        hs.name,
+        binder(hs.owner.as_deref(), &hs.params)
+    );
     let id = format!("recording {}", hs.id);
     let patched = if hs.module.as_deref() == Some("__main__") {
         backend::insert_marked(&original, "#", &id, &line, main_guard)
@@ -246,7 +271,7 @@ pub fn verify(ctx: &Ctx, port: &Port) -> Result<Verify> {
 
 // ------------------------------------------------------------------ the shim
 
-pub fn shim(port: &Port, lib_rel: &str) -> String {
+pub fn shim(port: &Port, params: &[Param], lib_rel: &str) -> String {
     let owner = owner(port.owner.as_deref());
     let name = &port.func;
     let mut lines = vec![
@@ -259,8 +284,9 @@ pub fn shim(port: &Port, lib_rel: &str) -> String {
         format!("    -> {{\n      lib = Fiddle.dlopen(File.expand_path(\"{lib_rel}\", __dir__))"),
         "      call = Fiddle::Function.new(lib[\"fa_call\"], [Fiddle::TYPE_VOIDP, Fiddle::TYPE_SIZE_T, Fiddle::TYPE_VOIDP], Fiddle::TYPE_VOIDP)".to_string(),
         "      free = Fiddle::Function.new(lib[\"fa_free\"], [Fiddle::TYPE_VOIDP, Fiddle::TYPE_SIZE_T], Fiddle::TYPE_VOID)".to_string(),
-        format!("      {owner}.send(:define_method, :{name}) do |*args|"),
-        "        input = JSON.generate(args)".to_string(),
+        format!("      bind = {}", binder(port.owner.as_deref(), params)),
+        format!("      {owner}.send(:define_method, :{name}) do |*args, **kw|"),
+        "        input = JSON.generate(instance_exec(*args, **kw, &bind))".to_string(),
         "        size = Fiddle::Pointer.malloc(Fiddle::SIZEOF_SIZE_T, Fiddle::RUBY_FREE)".to_string(),
         "        out = call.call(input, input.bytesize, size)".to_string(),
         "        len = size[0, Fiddle::SIZEOF_SIZE_T].unpack1(\"J\")".to_string(),
@@ -288,7 +314,13 @@ pub fn enable(ctx: &Ctx, port: &Port) -> Result<()> {
     let from = file.parent().context("file has no folder")?;
     let (_, lib) = backend::Lang::Ruby.artifact(&port.ext);
     let rel = forward_slashes(&relative(from, &ctx.lib_dir().join(lib)));
-    let block = shim(port, &rel);
+    let hs = ctx
+        .state
+        .hotspots
+        .iter()
+        .find(|h| h.id == port.id)
+        .with_context(|| format!("{} isn't in the last scan", port.id))?;
+    let block = shim(port, &hs.params, &rel);
     let patched = if port.module == "__main__" {
         backend::insert_marked(&text, "#", &port.id, &block, main_guard)
     } else {
@@ -306,6 +338,77 @@ pub fn disable(ctx: &Ctx, port: &Port) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn splat_and_keyword_arguments_are_bound_like_the_method_binds_them() {
+        let Ok(ruby) = resolve("ruby", Path::new(".")) else {
+            eprintln!("no Ruby 3.3+ on PATH, skipping");
+            return;
+        };
+        let tmp = std::env::temp_dir();
+        // macOS's temp folder is behind a symlink; the profile has the real paths
+        let tmp = if cfg!(windows) { tmp } else { tmp.canonicalize().unwrap() };
+        let dir = tmp.join(format!("fa-rb-splat-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let lib = "module Score\n  SCALE = 3\n\n  def self.score(word, *weights, scale: SCALE, bonus: 0)\n    total = 0\n    200.times { total += word.length * (weights.sum + bonus) * scale }\n    total\n  end\nend\n";
+        let app = "require_relative \"score\"\n\nt = 0\n2000.times { t += Score.score(\"ab\", 1, 2) + Score.score(\"c\", bonus: 1) + Score.score(\"d\", 4, scale: 2) }\nputs t\n";
+        fs::write(dir.join("score.rb"), lib).unwrap();
+        fs::write(dir.join("app.rb"), app).unwrap();
+        let ctx = Ctx::open(&dir).unwrap();
+        let run = || {
+            let p = profile(&ctx, &ruby, &["app.rb".into()])?;
+            let f = p.functions.iter().find(|f| f.name == "score").context("no score in the profile")?.clone();
+            let hs = Hotspot {
+                id: "score.Score.score".into(),
+                file: "score.rb".into(),
+                name: "score".into(),
+                module: Some("score".into()),
+                owner: f.owner.clone(),
+                params: f.params.clone(),
+                ..Hotspot::default()
+            };
+            let out = dir.join("cases.jsonl");
+            record(&ctx, &ruby, &["app.rb".into()], &hs, &out, 50)?;
+            let cases = fs::read_to_string(&out)?;
+            // the binder the shim uses, on its own
+            let bind = binder(hs.owner.as_deref(), &hs.params);
+            let script = format!(
+                "require \"json\"\nrequire_relative \"score\"\nbind = {bind}\nputs JSON.generate([Score.instance_exec(\"c\", bonus: 1, &bind), Score.instance_exec(\"d\", 4, 5, &bind)])\n"
+            );
+            fs::write(dir.join("bind.rb"), script)?;
+            let bound = output(Command::new(&ruby).arg("bind.rb").current_dir(&dir), "ruby")?;
+            anyhow::Ok((f, cases, bound))
+        };
+        let got = run();
+        let _ = fs::remove_dir_all(&dir);
+        let (f, cases, bound) = got.unwrap();
+        assert!(f.blockers.is_empty(), "{:?}", f.blockers);
+        let shape: Vec<_> =
+            f.params.iter().map(|p| (p.name.as_str(), p.default.as_deref(), p.kwonly, p.splat)).collect();
+        assert_eq!(
+            shape,
+            [
+                ("word", None, false, false),
+                ("weights", None, false, true),
+                ("scale", Some("SCALE"), true, false),
+                ("bonus", Some("0"), true, false)
+            ]
+        );
+        let args: std::collections::BTreeSet<String> =
+            cases.lines().map(|l| serde_json::from_str::<Value>(l).unwrap()["args"].to_string()).collect();
+        assert_eq!(
+            args.into_iter().collect::<Vec<_>>(),
+            [r#"["ab",[1,2],3,0]"#, r#"["c",[],3,1]"#, r#"["d",[4],2,0]"#],
+            "{cases}"
+        );
+        assert!(cases.lines().all(|l| !l.contains("raises")), "{cases}");
+        assert_eq!(
+            String::from_utf8_lossy(&bound.stdout).trim(),
+            r#"[["c",[],3,1],["d",[4,5],3,0]]"#,
+            "{}",
+            combined(&bound)
+        );
+    }
 
     #[test]
     fn ruby_defaults_become_json() {

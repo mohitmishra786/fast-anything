@@ -476,7 +476,7 @@ fn describe_file(path: &Path) -> Vec<Method> {
                     name: "receiver".into(),
                     annotation: Some(r.clone()),
                     default: None,
-                    kwonly: false,
+                    ..Param::default()
                 });
             }
             for p in split_top(&f.params) {
@@ -491,7 +491,7 @@ fn describe_file(path: &Path) -> Vec<Method> {
                 };
                 let (name, ty) = decl.split_once(':').unwrap_or((decl, ""));
                 let name = words(name).last().copied().unwrap_or_default().to_string();
-                params.push(Param { name, annotation: Some(ty.trim().to_string()), default, kwonly: false });
+                params.push(Param { name, annotation: Some(ty.trim().to_string()), default, ..Param::default() });
             }
             let body = f.body.map(|(b, e)| &code[b..=e]).unwrap_or_default();
             let io: Vec<&str> = IO.iter().filter(|w| body.contains(*w)).map(|w| w.trim_end_matches('(')).collect();
