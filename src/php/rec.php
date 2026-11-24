@@ -26,13 +26,20 @@ final class FastAnythingRec
     public static function enc($v): string
     {
         self::check($v);
-        return json_encode($v, JSON_PRESERVE_ZERO_FRACTION | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        return json_encode(self::wire($v), JSON_PRESERVE_ZERO_FRACTION | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+    }
+
+    // NaN and infinity, which JSON has no numbers for, travel as {"$float": "NaN"} (or
+    // "Infinity", "-Infinity"), as the port's C entry point reads and writes them
+    private static function wire($v)
+    {
+        if (is_float($v) && !is_finite($v)) return ['$float' => is_nan($v) ? 'NaN' : ($v > 0 ? 'Infinity' : '-Infinity')];
+        return is_array($v) ? array_map([self::class, 'wire'], $v) : $v;
     }
 
     private static function check($v): void
     {
         if (is_array($v)) { foreach ($v as $x) self::check($x); return; }
-        if (is_float($v) && !is_finite($v)) throw new InvalidArgumentException('NaN or INF');
         if (is_string($v) && !preg_match('//u', $v)) throw new InvalidArgumentException('binary string');
         if (is_object($v)) throw new InvalidArgumentException(get_class($v) . ' object');
         if (is_resource($v)) throw new InvalidArgumentException('resource');
@@ -110,7 +117,7 @@ final class FastAnythingRec
         if (is_int($v)) {
             foreach ([0, 1, -1] as $x) if ($x !== $v) $out[] = $x;
         } elseif (is_float($v)) {
-            foreach ([0.0, 1.0, -1.0, 1e300, 5e-324] as $x) if ($x !== $v) $out[] = $x;
+            foreach ([0.0, -0.0, 1.0, -1.0, 1e300, 5e-324, NAN, INF, -INF] as $x) if ($x !== $v) $out[] = $x;
         } elseif (is_string($v)) {
             $chars = preg_split('//u', $v, -1, PREG_SPLIT_NO_EMPTY);
             if ($chars === false) return [];

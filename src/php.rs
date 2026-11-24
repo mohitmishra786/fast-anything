@@ -289,7 +289,7 @@ pub const FLAVOR: Flavor = Flavor {
         "PHP ints are `i64` and turn into floats on overflow; `/` gives a float unless the division is exact, `intdiv` truncates.",
         "Untyped parameters arrive as `serde_json::Value`: pick concrete types from the recorded calls.",
     ],
-    floats: None,
+    floats: Some(native::FLOATS),
 };
 
 pub fn scaffold(ctx: &Ctx, hs: &Hotspot, helpers: &[Hotspot], port: &Port) -> Result<String> {
@@ -410,6 +410,77 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&run.stdout), "6\n", "{}", String::from_utf8_lossy(&run.stderr));
         assert!(enabled.contains("namespace {\nfinal class"), "{enabled}");
         assert_eq!(after, app);
+    }
+
+    #[test]
+    fn nan_and_infinity_travel_tagged() {
+        if !Command::new("php").arg("-v").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no php on PATH, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("fa-php-floats-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("rec.php"), REC).unwrap();
+        let bridge = BRIDGE.replace("/*CLASS*/", "Bridge").replace("/*ID*/", "scale").replace("/*LIB*/", "'none'");
+        fs::write(dir.join("bridge.php"), format!("<?php\n{bridge}\n")).unwrap();
+        // the recorder, then the bridge's own conversions both ways (the port isn't built here)
+        let check = r#"<?php
+            require __DIR__ . '/rec.php';
+            require __DIR__ . '/bridge.php';
+            function scale(array $xs, float $k): array
+            {
+                return array_map(fn($x) => $x * $k, $xs);
+            }
+            FastAnythingRec::record('scale', [[1.5, INF], -INF], 'scale');
+            FastAnythingRec::record('scale', [[0.0], 2.0], 'scale');
+            $wire = new ReflectionMethod('Bridge', 'wire');
+            $unwire = new ReflectionMethod('Bridge', 'unwire');
+            $sent = ['xs' => [NAN, -0.5, -INF], 'm' => ['k' => INF]];
+            echo json_encode($wire->invoke(null, $sent)), "\n";
+            $back = $unwire->invoke(null, json_decode('{"a":[1.5,{"$float":"NaN"},{"$float":"Infinity"},{"$float":"-Infinity"}],"b":{"$float":"x"},"c":[]}', true));
+            var_export([$back['a'][0], is_nan($back['a'][1]), $back['a'][2], $back['a'][3], $back['b'], $back['c']]);
+        "#;
+        fs::write(dir.join("check.php"), check).unwrap();
+        let out = dir.join("rec.jsonl");
+        let run = Command::new("php")
+            .arg("check.php")
+            .current_dir(&dir)
+            .env("FAST_ANYTHING_RECORD_OUT", &out)
+            .env("FAST_ANYTHING_RECORD_META", dir.join("meta.json"))
+            .output()
+            .unwrap();
+        let text = fs::read_to_string(&out).unwrap_or_default();
+        let _ = fs::remove_dir_all(&dir);
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        assert!(run.status.success(), "{stdout}{}", String::from_utf8_lossy(&run.stderr));
+        let recorded: Vec<Value> = text
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .filter(|c| c.get("derived").is_none())
+            .collect();
+        assert_eq!(
+            recorded[0],
+            serde_json::json!({"args": [[1.5, {"$float": "Infinity"}], {"$float": "-Infinity"}],
+                               "result": [{"$float": "-Infinity"}, {"$float": "-Infinity"}]}),
+            "{text}"
+        );
+        // and NaN and infinity are edge cases now that they can be passed
+        let edge = |want: &str| {
+            text.lines()
+                .map(|l| serde_json::from_str::<Value>(l).unwrap())
+                .any(|c| c["derived"] == "edge" && c["args"][1] == serde_json::json!({"$float": want}))
+        };
+        assert!(edge("NaN") && edge("Infinity") && edge("-Infinity"), "{text}");
+        let mut lines = stdout.lines();
+        assert_eq!(
+            lines.next(),
+            Some(r#"{"xs":[{"$float":"NaN"},-0.5,{"$float":"-Infinity"}],"m":{"k":{"$float":"Infinity"}}}"#)
+        );
+        let rest: String = lines.collect::<Vec<_>>().join("\n");
+        assert!(
+            rest.contains("1.5,\n  1 => true,\n  2 => INF,\n  3 => -INF,\n  4 => \n  array (\n    '$float' => 'x',"),
+            "{rest}"
+        );
     }
 
     #[test]
