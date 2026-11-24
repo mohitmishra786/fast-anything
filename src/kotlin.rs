@@ -5,7 +5,7 @@
 //! sources (top-level functions, object and companion members, extension functions) and the
 //! Kotlin prologues that hand a call to those classes.
 
-use crate::backend::{Lang, Profile, Recording};
+use crate::backend::{self, Lang, Profile, Recording};
 use crate::hotspot::{Hotspot, Param};
 use crate::java::{self, Method, Runner};
 use crate::native::{self, Flavor, Patches};
@@ -144,6 +144,39 @@ fn string_end(b: &[u8], i: usize) -> usize {
         j += 1;
     }
     b.len()
+}
+
+/// The last byte of the expression body whose `=` is at `eq` (in code_only text): it runs to a
+/// line break outside brackets, unless the line ends with an operator or the next one goes on
+/// with one (`.call()`, `?: x`, `&& y`, `else`), or to the bracket that closes around it.
+fn expression_end(code: &[u8], eq: usize) -> usize {
+    let mut depth = 0i32;
+    let mut k = eq + 1;
+    while k < code.len() {
+        match code[k] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' if depth == 0 => break,
+            b')' | b']' | b'}' => depth -= 1,
+            b';' if depth == 0 => break,
+            b'\n' if depth == 0 => {
+                let so_far = code[eq + 1..k].trim_ascii();
+                let rest = code[k..].trim_ascii_start();
+                // `=` ends the line: the body starts on the next one
+                let open = so_far.is_empty();
+                // (not `!` or `>`: `x!!` and `as List<Int>` can end one)
+                let dangling = so_far.last().is_some_and(|ch| b"=+-*/%&|<,.:?".contains(ch));
+                let goes_on =
+                    [&b"."[..], b"?.", b"?:", b"&&", b"||", b"as ", b"as?"].iter().any(|w| rest.starts_with(w))
+                        || word_at(rest, 0, "else");
+                if !(open || dangling || goes_on) {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        k += 1;
+    }
+    code[..k].trim_ascii_end().len().saturating_sub(1).max(eq)
 }
 
 /// The index of the bracket matching the one at `open` (in code_only text).
@@ -413,7 +446,7 @@ fn describe_file(path: &Path) -> Vec<Method> {
                     }
                     let (body, expression) = match c.get(k) {
                         Some(b'{') => (matching(c, k).map(|e| (k, e)), false),
-                        Some(b'=') => (None, true),
+                        Some(b'=') => (Some((k, expression_end(c, k))), true),
                         _ => (None, false),
                     };
                     found.push(Found {
@@ -461,12 +494,11 @@ fn describe_file(path: &Path) -> Vec<Method> {
             if f.generic {
                 blockers.push("generic".to_string());
             }
-            if f.expression {
-                blockers.push("expression body: write it as { return ... } to port it".to_string());
-            } else if f.body.is_none() {
+            if f.body.is_none() {
                 blockers.push("no body".to_string());
             }
             match f.returns.as_deref() {
+                None if f.expression => blockers.push("expression body without a declared return type".to_string()),
                 None | Some("Unit") => blockers.push("returns nothing (Unit)".to_string()),
                 _ => {}
             }
@@ -566,6 +598,84 @@ fn find_body(name: &str, hint: u32) -> impl Fn(&str) -> Option<usize> {
     }
 }
 
+/// Where the `=` of the function's expression body is (`fun f(x: Int): Int = x * 2`), or None
+/// when it has a block body.
+fn expression_eq(text: &str, name: &str, hint: u32) -> Option<usize> {
+    let code = code_only(text);
+    let c = code.as_bytes();
+    let header = find_body_header(name, hint, &code)?;
+    let line = &code[header..];
+    let at = line.find(&format!(" {name}(")).or_else(|| line.find(&format!(".{name}(")))?;
+    let open = header + at + 1 + name.len();
+    let close = matching(c, open)?;
+    let mut k = close + 1;
+    while k < c.len() && c[k].is_ascii_whitespace() && c[k] != b'\n' {
+        k += 1;
+    }
+    if c.get(k) == Some(&b':') {
+        let mut depth = 0;
+        while k < c.len() {
+            match c[k] {
+                b'<' | b'(' => depth += 1,
+                b'>' | b')' => depth -= 1,
+                b'{' | b'=' | b'\n' if depth == 0 => break,
+                _ => {}
+            }
+            k += 1;
+        }
+    }
+    while k < c.len() && c[k].is_ascii_whitespace() {
+        k += 1;
+    }
+    (c.get(k) == Some(&b'=') && c.get(k + 1) != Some(&b'=')).then_some(k)
+}
+
+/// The byte where the declaration line of `name` nearest `hint` starts.
+fn find_body_header(name: &str, hint: u32, code: &str) -> Option<usize> {
+    let (spaced, dotted) = (format!(" {name}("), format!(".{name}("));
+    let mut at = 0;
+    let mut best: Option<(i64, usize)> = None;
+    for (i, l) in code.split_inclusive('\n').enumerate() {
+        if l.contains("fun ") && (l.contains(&spaced) || l.contains(&dotted)) {
+            let dist = (i as i64 + 1 - hint as i64).abs();
+            if best.is_none_or(|(d, _)| dist < d) {
+                best = Some((dist, at));
+            }
+        }
+        at += l.len();
+    }
+    best.map(|(_, at)| at)
+}
+
+/// Put `code` (an `if (...) value` that stands in for the body) right after the `=` of an
+/// expression body, or else `block` at the top of the block body. The original expression
+/// becomes the `else` branch: Kotlin's `else` takes the whole expression that follows.
+fn patch_body(text: &str, id: &str, name: &str, hint: u32, block: &str, inline: &str) -> Result<String> {
+    let text = strip_inline(text, id);
+    match expression_eq(&text, name, hint) {
+        Some(eq) => {
+            let (begin, end) = backend::markers("//", id);
+            Ok(format!("{} /* {begin} */ {inline} else /* {end} */{}", &text[..=eq], &text[eq + 1..]))
+        }
+        None => native::insert_in_body(&text, "//", id, block, find_body(name, hint)),
+    }
+}
+
+/// Take out what patch_body put in, either form; the rest comes back byte for byte.
+fn unpatch(text: &str, id: &str) -> String {
+    // the inline form first: its markers would also match strip_in_body's whole-line search
+    native::strip_in_body(&strip_inline(text, id), "//", id)
+}
+
+/// Take out what patch_body put after an expression body's `=`; the rest comes back byte for byte.
+fn strip_inline(text: &str, id: &str) -> String {
+    let (begin, end) = backend::markers("//", id);
+    let (begin, end) = (format!(" /* {begin} */"), format!(" /* {end} */"));
+    let Some(b) = text.find(&begin) else { return text.to_string() };
+    let Some(e) = text[b..].find(&end).map(|e| b + e + end.len()) else { return text.to_string() };
+    format!("{}{}", &text[..b], &text[e..])
+}
+
 fn package_of(text: &str) -> String {
     text.lines()
         .find_map(|l| l.trim().strip_prefix("package ").map(|p| p.trim().trim_end_matches(';').to_string()))
@@ -656,12 +766,18 @@ pub fn record(ctx: &Ctx, program: &str, args: &[String], hs: &Hotspot, out: &Pat
     let dir = java_dir(&file, &package)?;
     let package_line = if package.is_empty() { String::new() } else { format!("package {package};") };
     let rec = java::REC.replace("/*PACKAGE*/", &package_line).replace("/*ID*/", &hs.id).replace("/*JSON*/", java::JSON);
-    let patched = native::insert_in_body(
+    let patched = patch_body(
         &text,
-        "//",
         &format!("recording {}", hs.id),
+        &hs.name,
+        hs.line,
         &record_prologue(hs),
-        find_body(&hs.name, hs.line),
+        &format!(
+            "if (!FastAnythingRec.inside) (FastAnythingRec.record({}) {{ __faA -> {} }} as {})",
+            args_array(hs),
+            call_with(hs),
+            ret(hs)
+        ),
     )?;
     let meta = out.with_extension("meta.json");
     let created = create_dirs(&dir)?;
@@ -829,7 +945,8 @@ pub fn enable(ctx: &Ctx, port: &Port) -> Result<()> {
         args = args_array(hs),
         ret = ret(hs),
     );
-    let patched = native::insert_in_body(&text, "//", &port.id, &prologue, find_body(&port.func, hs.line))?;
+    let inline = format!("if ({class}.ON) ({class}.call({}) as {})", args_array(hs), ret(hs));
+    let patched = patch_body(&text, &port.id, &port.func, hs.line, &prologue, &inline)?;
     create_dirs(&dir)?;
     fs::write(dir.join(format!("{class}.java")), bridge)?;
     fs::write(&file, patched).with_context(|| format!("writing {}", port.file))
@@ -838,7 +955,8 @@ pub fn enable(ctx: &Ctx, port: &Port) -> Result<()> {
 pub fn disable(ctx: &Ctx, port: &Port) -> Result<()> {
     let file = ctx.root.join(&port.file);
     let text = fs::read_to_string(&file).with_context(|| format!("reading {}", port.file))?;
-    fs::write(&file, native::strip_in_body(&text, "//", &port.id)).with_context(|| format!("writing {}", port.file))?;
+    let text = unpatch(&text, &port.id);
+    fs::write(&file, &text).with_context(|| format!("writing {}", port.file))?;
     let dir = java_dir(&file, &package_of(&text))?;
     let bridge = dir.join(format!("{}.java", bridge_class(port)));
     if bridge.exists() {
@@ -902,6 +1020,45 @@ mod tests {
         );
         let named = describe_text("tools.kt", "@file:JvmName(\"Tools\")\npackage demo\nfun one(): Int { return 1 }\n");
         assert_eq!(named[0].class, "demo.Tools");
+    }
+
+    #[test]
+    fn expression_bodies_are_portable() {
+        let text = "package demo\n\nfun twice(xs: List<Int>): List<Int> =\n    xs.map { it * 2 }\n        .filter { it > 0 }\n\n\
+                    fun total(xs: IntArray): Long = xs.fold(0L) { s, x ->\n    s + x\n}\n\n\
+                    fun noisy(x: Int): Int = x.also { println(it) }\n\nfun after(x: Int): Int {\n    return x\n}\n";
+        let ms = describe_text("expr.kt", text);
+        let by = |n: &str| ms.iter().find(|m| m.name == n).unwrap();
+        assert!(by("twice").blockers.is_empty(), "{:?}", by("twice").blockers);
+        assert_eq!((by("twice").line, by("twice").end_line), (3, 5));
+        assert_eq!((by("total").line, by("total").end_line), (7, 9));
+        assert!(by("noisy").blockers.iter().any(|b| b.contains("I/O")), "{:?}", by("noisy").blockers);
+        assert!(by("after").blockers.is_empty());
+
+        // the bridge goes in front of the expression, and comes out again byte for byte
+        for (name, line) in [("twice", 3), ("total", 7), ("after", 13)] {
+            let patched = patch_body(text, "demo.x", name, line, "return 1", "if (ON) (1)").unwrap();
+            let (begin, _) = backend::markers("//", "demo.x");
+            assert!(patched.contains(&begin), "{patched}");
+            assert_eq!(unpatch(&patched, "demo.x"), text);
+            // and the function's source is still found where it was recorded
+            let ms = describe_text("again.kt", text);
+            let m = ms.iter().find(|m| m.name == name).unwrap();
+            let source: String = text
+                .lines()
+                .skip(m.line as usize - 1)
+                .take((m.end_line - m.line + 1) as usize)
+                .map(|l| format!("{l}\n"))
+                .collect();
+            assert!(crate::state::found(&patched, &source), "{patched}");
+        }
+        let patched = patch_body(text, "demo.x", "twice", 3, "return 1", "if (ON) (1)").unwrap();
+        assert!(
+            patched.contains("List<Int> = /* // >>> fast-anything: demo.x >>> */ if (ON) (1) else /* // <<< fast-anything: demo.x <<< */\n    xs.map"),
+            "{patched}"
+        );
+        // patching again replaces the first one
+        assert_eq!(patch_body(&patched, "demo.x", "twice", 3, "return 1", "if (ON) (1)").unwrap(), patched);
     }
 
     #[test]

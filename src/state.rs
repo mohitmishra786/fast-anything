@@ -86,6 +86,7 @@ fn forms(source: &str) -> [String; 3] {
 /// The file without fast-anything's own marked blocks: an enabled Java, Go, C#, C/C++, PHP or
 /// Kotlin port puts one inside the function's body, and that isn't a change to the original.
 fn without_blocks(text: &str) -> String {
+    let text = without_inline(text);
     let mut out = String::with_capacity(text.len());
     let mut inside = false;
     for line in text.split_inclusive('\n') {
@@ -102,8 +103,27 @@ fn without_blocks(text: &str) -> String {
     out
 }
 
+/// The text without the blocks fast-anything puts inside a line (` /* // >>> fast-anything: id >>> */ ...
+/// /* // <<< fast-anything: id <<< */`, after a Kotlin expression body's `=`).
+fn without_inline(text: &str) -> String {
+    let (begin, end) = (" /* // >>> fast-anything: ", " <<< */");
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(b) = rest.find(begin) {
+        let line_end = rest[b..].find('\n').map_or(rest.len(), |n| b + n);
+        let close = rest[b..line_end]
+            .find("/* // <<< fast-anything: ")
+            .and_then(|c| rest[b + c..line_end].find(end).map(|e| b + c + e + end.len()));
+        let Some(close) = close else { break };
+        out.push_str(&rest[..b]);
+        rest = &rest[close..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The source appears in the file as whole lines.
-fn found(text: &str, source: &str) -> bool {
+pub(crate) fn found(text: &str, source: &str) -> bool {
     let text = format!("\n{}\n", without_blocks(text).replace("\r\n", "\n"));
     forms(source).iter().any(|s| text.contains(&format!("\n{}\n", s.trim_end_matches('\n'))))
 }
