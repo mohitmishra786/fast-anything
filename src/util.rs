@@ -48,6 +48,17 @@ pub fn output(cmd: &mut Command, what: &str) -> Result<Output> {
 /// SIGTERM elsewhere), so it can shut down cleanly and write what it has, then ends it for good after `grace`.
 /// Also says whether it had to be stopped.
 pub fn output_for(cmd: &mut Command, what: &str, limit: Option<Duration>, grace: Duration) -> Result<(Output, bool)> {
+    output_signalling(cmd, what, limit, grace, "TERM")
+}
+
+/// output_for, asking the process to stop with this signal on Unix (INT is Ctrl+C).
+pub fn output_signalling(
+    cmd: &mut Command,
+    what: &str,
+    limit: Option<Duration>,
+    grace: Duration,
+    signal: &str,
+) -> Result<(Output, bool)> {
     let Some(limit) = limit else { return Ok((output(cmd, what)?, false)) };
     let mut child = cmd
         .stdout(Stdio::piped())
@@ -72,7 +83,7 @@ pub fn output_for(cmd: &mut Command, what: &str, limit: Option<Duration>, grace:
         }
         match asked {
             None if started.elapsed() >= limit => {
-                asked = Some(if ask_to_close(child.id()) { Instant::now() } else { Instant::now() - grace });
+                asked = Some(if ask_to_close(child.id(), signal) { Instant::now() } else { Instant::now() - grace });
             }
             Some(at) if at.elapsed() >= grace => {
                 let _ = child.kill();
@@ -87,8 +98,9 @@ pub fn output_for(cmd: &mut Command, what: &str, limit: Option<Duration>, grace:
 }
 
 /// Ask a process to close the way a user would. False if it can't be asked (a console app on Windows).
-fn ask_to_close(pid: u32) -> bool {
-    let (program, args) = if cfg!(windows) { ("taskkill", ["/PID"]) } else { ("kill", ["-TERM"]) };
+fn ask_to_close(pid: u32, signal: &str) -> bool {
+    let flag = format!("-{signal}");
+    let (program, args) = if cfg!(windows) { ("taskkill", ["/PID"]) } else { ("kill", [flag.as_str()]) };
     Command::new(program)
         .args(args)
         .arg(pid.to_string())

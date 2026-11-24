@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
 const RUNNER: &str = include_str!("r/runner.R");
 const STARTUP: &str = include_str!("r/startup.R");
@@ -127,8 +128,23 @@ fn runner(ctx: &Ctx, rscript: &str, mode: &str, job: Value) -> Result<Output> {
 
 /// Run the app with fast-anything's startup file loaded first (the app's own still runs after it).
 fn run_app(ctx: &Ctx, rscript: &str, args: &[String], mode: &str, env: &[(&str, &Path)]) -> Result<Output> {
+    Ok(run_app_for(ctx, rscript, args, mode, env, None)?.0)
+}
+
+/// run_app, ending the app after `duration` seconds (and stopping it from outside 15s later).
+fn run_app_for(
+    ctx: &Ctx,
+    rscript: &str,
+    args: &[String],
+    mode: &str,
+    env: &[(&str, &Path)],
+    duration: Option<f64>,
+) -> Result<(Output, bool)> {
     write_scripts(ctx)?;
     let mut cmd = Command::new(rscript);
+    if let Some(d) = duration {
+        cmd.env("FAST_ANYTHING_STOP_AFTER", d.to_string());
+    }
     cmd.args(args)
         .current_dir(&ctx.root)
         .env("R_PROFILE_USER", ctx.fast.join("startup.R"))
@@ -141,14 +157,23 @@ fn run_app(ctx: &Ctx, rscript: &str, args: &[String], mode: &str, env: &[(&str, 
     for (k, v) in env {
         cmd.env(k, v);
     }
-    output(&mut cmd, "Rscript")
+    // R stops on Ctrl+C even in a blocking call, and its error handler (startup.R) then quits cleanly
+    crate::util::output_signalling(
+        &mut cmd,
+        "Rscript",
+        duration.map(Duration::from_secs_f64),
+        Duration::from_secs(15),
+        "INT",
+    )
 }
 
-pub fn profile(ctx: &Ctx, rscript: &str, args: &[String]) -> Result<Profile> {
+/// `duration`: end the app after that many seconds (servers that run until closed).
+pub fn profile(ctx: &Ctx, rscript: &str, args: &[String], duration: Option<f64>) -> Result<Profile> {
     let script = entry(args)?.clone();
     let rprof = ctx.fast.join("Rprof.out");
-    let run = run_app(ctx, rscript, args, "profile", &[("FAST_ANYTHING_OUT", &rprof)])?;
+    let (run, stopped) = run_app_for(ctx, rscript, args, "profile", &[("FAST_ANYTHING_OUT", &rprof)], duration)?;
     ensure!(run.status.success(), "the app failed ({}):\n{}", run.status, tail(&combined(&run), 30));
+    ensure!(!stopped || rprof.exists(), "the app didn't stop on Ctrl+C after --duration");
     let result = ctx.fast.join("profile.json");
     let job = json!({ "root": ctx.root, "rprof": rprof, "entry": ctx.root.join(script), "out": result });
     runner(ctx, rscript, "report", job)?;
@@ -605,6 +630,25 @@ pub fn disable(ctx: &Ctx, port: &Port) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duration_ends_an_app_that_runs_until_closed() {
+        if !Command::new("Rscript").arg("--version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no Rscript on PATH, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("fa-r-duration-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        // a server's shape: some work, then a long blocking wait
+        let app = "work <- function(n) {\n  s <- 0\n  for (i in seq_len(n)) s <- s + i * i %% 7\n  s\n}\n\nif (sys.nframe() == 0) {\n  for (k in 1:3) work(400000)\n  Sys.sleep(3600)\n}\n";
+        fs::write(dir.join("app.R"), app).unwrap();
+        let ctx = Ctx::open(&dir).unwrap();
+        let p = profile(&ctx, "Rscript", &["app.R".into()], Some(2.0));
+        let _ = fs::remove_dir_all(&dir);
+        let p = p.unwrap();
+        assert!(p.functions.iter().any(|f| f.name == "work"), "{:?}", p.functions);
+        assert!((1.5..12.0).contains(&p.wall), "{}", p.wall);
+    }
 
     #[test]
     fn spots_r_and_its_script() {
