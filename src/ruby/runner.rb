@@ -186,8 +186,21 @@ def cmd_profile(job, argv)
       stack.last[2] += took if stack.last
     end
   end
+  # scan --duration: a server or GUI runs until closed, so interrupt it after that long, like Ctrl+C
+  stopped = false
+  stopper = job["duration"] && Thread.new do
+    sleep job["duration"]
+    stopped = true
+    Thread.main.raise(Interrupt)
+  end
   started = Process.clock_gettime(clock)
-  tracer.enable { run_target(script, rest) }
+  begin
+    tracer.enable { run_target(script, rest) }
+  rescue Interrupt, SystemExit
+    raise unless stopped # the app's own, not the one --duration sent
+  ensure
+    stopper&.kill
+  end
   wall = Process.clock_gettime(clock) - started
 
   rows = stats.filter_map do |(path, name), (calls, own, cum)|
