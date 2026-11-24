@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 const DESCRIBE: &str = include_str!("php/describe.php");
 const PROF: &str = include_str!("php/prof.php");
@@ -148,7 +149,22 @@ fn run_php(
     args: &[String],
     env: &[(&str, &Path)],
 ) -> Result<std::process::Output> {
+    Ok(run_php_for(ctx, php, prepend, args, env, None)?.0)
+}
+
+/// run_php, ending the app after `duration` seconds (and stopping it from outside 15s later).
+fn run_php_for(
+    ctx: &Ctx,
+    php: &str,
+    prepend: &Path,
+    args: &[String],
+    env: &[(&str, &Path)],
+    duration: Option<f64>,
+) -> Result<(std::process::Output, bool)> {
     let mut cmd = Command::new(php);
+    if let Some(d) = duration {
+        cmd.env("FAST_ANYTHING_STOP_AFTER_MS", ((d * 1000.0) as u64).to_string());
+    }
     cmd.arg("-d")
         .arg(format!("auto_prepend_file={}", prepend.display()))
         .args(args)
@@ -158,10 +174,16 @@ fn run_php(
     for (k, v) in env {
         cmd.env(k, v);
     }
-    output(&mut cmd, "php")
+    util::output_for(
+        &mut cmd,
+        "php",
+        duration.map(|d| Duration::from_secs_f64(d.ceil() + 15.0)),
+        Duration::from_secs(10),
+    )
 }
 
-pub fn profile(ctx: &Ctx, php: &str, args: &[String]) -> Result<Profile> {
+/// `duration`: end the app after that many seconds (servers that run until closed).
+pub fn profile(ctx: &Ctx, php: &str, args: &[String], duration: Option<f64>) -> Result<Profile> {
     let funcs = describe(ctx, php, &source_files(&ctx.root, entry(args)?))?;
     let mut by_file: BTreeMap<&Path, Vec<(usize, String)>> = BTreeMap::new();
     for (i, f) in funcs.iter().enumerate() {
@@ -181,9 +203,10 @@ pub fn profile(ctx: &Ctx, php: &str, args: &[String]) -> Result<Profile> {
         let text = fs::read_to_string(path)?;
         patches.write(path, &insert_at(&text, at))?;
     }
-    let run = run_php(ctx, php, &prof, args, &[("FAST_ANYTHING_PROF_OUT", &out)]);
+    let run = run_php_for(ctx, php, &prof, args, &[("FAST_ANYTHING_PROF_OUT", &out)], duration);
     patches.restore()?;
-    let run = run?;
+    let (run, killed) = run?;
+    ensure!(!killed, "the app was still running 15s after --duration: PHP needs the pcntl extension for it");
     ensure!(run.status.success(), "the app failed ({}):\n{}", run.status, tail(&combined(&run), 30));
     let result: Value = serde_json::from_str(&fs::read_to_string(&out).context("the profiler wrote nothing")?)?;
     let wall = result["wall"].as_f64().unwrap_or(0.0);
@@ -353,6 +376,28 @@ pub fn disable(ctx: &Ctx, port: &Port) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duration_ends_an_app_that_runs_until_closed() {
+        let pcntl = Command::new("php").args(["-r", "echo function_exists('pcntl_alarm') ? 1 : 0;"]).output();
+        if !pcntl.is_ok_and(|o| o.status.success() && o.stdout == b"1") {
+            eprintln!("no php with pcntl on PATH, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("fa-php-duration-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        // a server's shape: some work, then a long blocking wait
+        let app = "<?php\nfunction work(int $n): int\n{\n    $s = 0;\n    for ($i = 0; $i < $n; $i++) $s += $i * $i % 7;\n    return $s;\n}\n\nfor ($k = 0; $k < 3; $k++) work(300000);\nsleep(3600);\n";
+        fs::write(dir.join("app.php"), app).unwrap();
+        let ctx = Ctx::open(&dir).unwrap();
+        let p = profile(&ctx, "php", &["app.php".into()], Some(1.0));
+        let after = fs::read_to_string(dir.join("app.php")).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        let p = p.unwrap();
+        assert!(p.functions.iter().any(|f| f.name == "work" && f.ncalls == 3), "{:?}", p.functions);
+        assert!((0.9..10.0).contains(&p.wall), "{}", p.wall);
+        assert_eq!(after, app);
+    }
 
     #[test]
     fn php_bits() {

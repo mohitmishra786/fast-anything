@@ -30,6 +30,15 @@ final class FastAnythingProf
 }
 
 FastAnythingProf::$started = hrtime(true);
+// scan --duration: a server runs until closed, so end it after that long (exit runs the shutdown
+// function below). Needs pcntl; without it, scan stops the app from outside and says so.
+$__faStop = (int) getenv('FAST_ANYTHING_STOP_AFTER_MS');
+if ($__faStop > 0 && function_exists('pcntl_alarm')) {
+    pcntl_async_signals(true);
+    pcntl_signal(SIGALRM, fn() => exit(0));
+    pcntl_alarm(max(1, (int) ceil($__faStop / 1000)));
+}
+unset($__faStop);
 register_shutdown_function(function () {
     $wall = (hrtime(true) - FastAnythingProf::$started) / 1e9;
     $stats = [];
