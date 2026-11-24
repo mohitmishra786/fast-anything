@@ -631,6 +631,7 @@ pub fn disable(ctx: &Ctx, port: &Port) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)] // scan interrupts R with SIGINT, which Windows doesn't have
     #[test]
     fn duration_ends_an_app_that_runs_until_closed() {
         if !Command::new("Rscript").arg("--version").output().is_ok_and(|o| o.status.success()) {
