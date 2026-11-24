@@ -141,7 +141,7 @@ impl Lang {
 
     /// Whether `scan --duration` can stop this language's apps.
     pub fn stops_after_duration(self) -> bool {
-        matches!(self, Lang::Python | Lang::CSharp)
+        matches!(self, Lang::Python | Lang::C | Lang::Cpp | Lang::CSharp)
     }
 
     /// `duration` (see stops_after_duration): stop the app after that many seconds.
@@ -153,7 +153,7 @@ impl Lang {
             Lang::Java => java::profile(ctx, exe, args),
             Lang::Go => golang::profile(ctx, exe, args),
             Lang::Php => php::profile(ctx, exe, args),
-            Lang::C | Lang::Cpp => cfamily::profile(ctx, exe, args, self),
+            Lang::C | Lang::Cpp => cfamily::profile(ctx, exe, args, self, duration),
             Lang::CSharp => csharp::profile(ctx, exe, args, duration),
             Lang::R => r::profile(ctx, exe, args),
             Lang::Kotlin => kotlin::profile(ctx, exe, args),

@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 const PROF_H: &str = include_str!("cfamily/prof.h");
 const PROF_C: &str = include_str!("cfamily/prof.c");
@@ -156,7 +157,22 @@ fn errors_first(log: &str) -> String {
 }
 
 fn run(ctx: &Ctx, bin: &Path, b: &Build, env: &[(&str, &Path)], derive: bool) -> Result<std::process::Output> {
+    Ok(run_for(ctx, bin, b, env, derive, None)?.0)
+}
+
+/// run, ending the app after `duration` seconds (and stopping it from outside 15s later).
+fn run_for(
+    ctx: &Ctx,
+    bin: &Path,
+    b: &Build,
+    env: &[(&str, &Path)],
+    derive: bool,
+    duration: Option<f64>,
+) -> Result<(std::process::Output, bool)> {
     let mut cmd = Command::new(bin);
+    if let Some(d) = duration {
+        cmd.env("FAST_ANYTHING_STOP_AFTER_MS", ((d * 1000.0) as u64).to_string());
+    }
     cmd.args(&b.args).current_dir(&ctx.root).env(DISABLE_ENV, "1").stdin(Stdio::null());
     for (k, v) in env {
         cmd.env(k, v);
@@ -164,7 +180,12 @@ fn run(ctx: &Ctx, bin: &Path, b: &Build, env: &[(&str, &Path)], derive: bool) ->
     if !derive {
         cmd.env("FAST_ANYTHING_RECORD_DERIVE", "0");
     }
-    output(&mut cmd, "the app")
+    util::output_for(
+        &mut cmd,
+        "the app",
+        duration.map(|d| Duration::from_secs_f64(d.ceil() + 15.0)),
+        Duration::from_secs(10),
+    )
 }
 
 pub fn bench_command(ctx: &Ctx, cc: &str) -> Result<(String, Vec<String>)> {
@@ -849,7 +870,8 @@ fn runtime_source(dir: &Path, name: &str, text: &str, lang: Lang) -> Result<Path
     Ok(path)
 }
 
-pub fn profile(ctx: &Ctx, cc: &str, args: &[String], lang: Lang) -> Result<Profile> {
+/// `duration`: end the app after that many seconds (servers that run until closed).
+pub fn profile(ctx: &Ctx, cc: &str, args: &[String], lang: Lang, duration: Option<f64>) -> Result<Profile> {
     let b = Build::parse(args)?;
     let found = describe(ctx, &b, lang)?;
     let dir = runtime_dir(ctx)?;
@@ -868,7 +890,8 @@ pub fn profile(ctx: &Ctx, cc: &str, args: &[String], lang: Lang) -> Result<Profi
     let bin = bin?;
     let out = ctx.fast.join("profile.json");
     let _ = fs::remove_file(&out);
-    let ran = run(ctx, &bin, &b, &[("FAST_ANYTHING_PROF_OUT", &out)], true)?;
+    let (ran, killed) = run_for(ctx, &bin, &b, &[("FAST_ANYTHING_PROF_OUT", &out)], true, duration)?;
+    ensure!(!killed, "the app was still running 15s after --duration");
     ensure!(ran.status.success(), "the app failed ({}):\n{}", ran.status, tail(&combined(&ran), 30));
     let result: Value = serde_json::from_str(
         &fs::read_to_string(&out).context("the profiler wrote nothing: does main return normally?")?,
@@ -1384,6 +1407,28 @@ pub fn disable(ctx: &Ctx, port: &Port) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duration_ends_an_app_that_runs_until_closed() {
+        let Some(cc) = ["cc", "gcc", "clang"].into_iter().find(|c| Command::new(c).arg("--version").output().is_ok())
+        else {
+            eprintln!("no C compiler on PATH, skipping");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("fa-c-duration-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        // a server's shape: work, forever
+        let main = "long work(long n) {\n    long s = 0;\n    for (long i = 0; i < n; i++) s += i * i % 7;\n    return s;\n}\n\nint main(void) {\n    volatile long sink = 0;\n    for (;;) sink += work(20000000);\n}\n";
+        fs::write(dir.join("main.c"), main).unwrap();
+        let ctx = Ctx::open(&dir).unwrap();
+        let p = profile(&ctx, cc, &["-O1".into(), "main.c".into()], Lang::C, Some(1.0));
+        let after = fs::read_to_string(dir.join("main.c")).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        let p = p.unwrap();
+        assert!(p.functions.iter().any(|f| f.name == "work" && f.ncalls > 0), "{:?}", p.functions);
+        assert!((0.9..10.0).contains(&p.wall), "{}", p.wall);
+        assert_eq!(after, main);
+    }
 
     #[test]
     fn finds_c_and_cpp_functions() {
