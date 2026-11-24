@@ -67,7 +67,7 @@ enum Cmd {
     },
     /// Run your app under a profiler and rank what's worth porting
     Scan {
-        /// Stop the app after this many seconds and rank what ran (Python, Node, Go, Java, Kotlin, Ruby, PHP, C, C++, C#: servers and GUIs that don't exit)
+        /// Stop the app after this many seconds and rank what ran (Python, Node, Go, Java, Kotlin, Ruby, PHP, C, C++, R, C#: servers and GUIs that don't exit)
         #[arg(long, value_name = "SECS")]
         duration: Option<f64>,
         /// How you run your app, after --

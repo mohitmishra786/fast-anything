@@ -23,7 +23,7 @@ fn tools() -> Value {
         tool(
             "fast_scan",
             "Run the app under a profiler and rank functions by time share and portability to Rust.",
-            json!({ "command": { "type": "array", "items": { "type": "string" }, "description": "How the app runs, e.g. [\"python\", \"app.py\"] or [\"go\", \"run\", \".\"]" }, "duration": { "type": "number", "description": "Python, Node, Go, Java, Kotlin, Ruby, PHP, C, C++ and C#: stop the app after this many seconds (GUIs, servers)" }, "path": path }),
+            json!({ "command": { "type": "array", "items": { "type": "string" }, "description": "How the app runs, e.g. [\"python\", \"app.py\"] or [\"go\", \"run\", \".\"]" }, "duration": { "type": "number", "description": "Python, Node, Go, Java, Kotlin, Ruby, PHP, C, C++, R and C#: stop the app after this many seconds (GUIs, servers)" }, "path": path }),
             json!(["command"])
         ),
         tool(

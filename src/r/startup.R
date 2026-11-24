@@ -20,6 +20,14 @@ local({
     }, onexit = TRUE)
     # kept reachable, so the finalizer runs when R exits, not at the next garbage collection
     assign(".fast_anything_profile", fa, envir = globalenv())
+    # scan --duration: a server runs until closed, so scan interrupts it (SIGINT) after that long;
+    # quitting then runs the finalizer above
+    stop_after <- as.numeric(Sys.getenv("FAST_ANYTHING_STOP_AFTER", "0"))
+    if (!is.na(stop_after) && stop_after > 0) {
+      options(error = function() {
+        if (proc.time()[["elapsed"]] - start >= stop_after - 0.5) quit("no", status = 0)
+      })
+    }
   }
 
   if (mode == "record") {
