@@ -19,18 +19,24 @@ def _fast_anything_watch_workers():
         return
 
     def _bootstrap(self, *args, **kwargs):
+        state = None
         if os.name == "posix":
-            # Pool.terminate() (and with Pool(...) as p) ends workers with SIGTERM: exit normally
-            # instead, so the worker still leaves its results. Set first, before anything slow.
+            # Pool.terminate() (and with Pool(...) as p) ends workers with SIGTERM: write the
+            # worker's results first, then end it the way SIGTERM would have. Not by raising
+            # SystemExit: that can land in the finally below before the results are written, or
+            # be swallowed (a handler can run inside a __del__), leaving a worker that never exits.
+            # Set first, before anything slow.
             import signal
 
             def _on_term(*_):
                 # a second SIGTERM must not cut the worker off while it writes its results
                 signal.signal(signal.SIGTERM, signal.SIG_IGN)
-                sys.exit(0)
+                if state is not None:
+                    state.finish()
+                signal.signal(signal.SIGTERM, signal.SIG_DFL)
+                os.kill(os.getpid(), signal.SIGTERM)
 
             signal.signal(signal.SIGTERM, _on_term)
-        state = None
         try:
             state = sys.modules.get("_fast_anything_state")
             if state is None:  # a fresh interpreter (spawn, forkserver): load the runner
