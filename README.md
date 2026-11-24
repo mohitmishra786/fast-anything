@@ -98,7 +98,7 @@ fast-anything ports the outermost loop it can, not the tiny function called insi
 | Java 22+ (`java App.java`, Maven, Gradle) | the same C bridge, through the FFM API | ✅ |
 | Kotlin/JVM (Gradle, `src/main/kotlin`, JDK 22+) | the Java bridge; top-level functions, `object` and companion members, extension functions | ✅ |
 | Go 1.22+ (`go run .`) | the same C bridge, through the Windows loader or dlopen (cgo) | ✅ |
-| PHP 8.1+ (`php app.php`) | the same C bridge, through PHP's FFI extension (`extension=ffi`) | ✅ |
+| PHP 8.1+ (`php app.php`) | the same C bridge, through PHP's FFI extension (`extension=ffi`); servers: `scan --duration 30` (with `pcntl`) | ✅ |
 | C and C++ (gcc, clang or Intel oneAPI icx/icpx: `clang -O2 main.c lib.c`) | the same C bridge, through LoadLibrary or dlopen | ✅ |
 | C# / .NET 8+ (`dotnet run -c Release`) | the same C bridge, through NativeLibrary; profiled with EventPipe, nothing to install; GUIs and servers: `scan --duration 30` | ✅ |
 | R 4.0+ (`Rscript app.R`) | the same C bridge, through base R's `.C()`; profiled with Rprof, no packages or R headers needed | ✅ |
