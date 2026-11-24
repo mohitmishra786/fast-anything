@@ -549,8 +549,8 @@ fn describe(ctx: &Ctx) -> Result<Vec<Method>> {
     Ok(files.iter().flat_map(|f| describe_file(f)).collect())
 }
 
-pub fn profile(ctx: &Ctx, program: &str, args: &[String]) -> Result<Profile> {
-    java::profile_with(ctx, program, args, |_| describe(ctx))
+pub fn profile(ctx: &Ctx, program: &str, args: &[String], duration: Option<f64>) -> Result<Profile> {
+    java::profile_with(ctx, program, args, duration, |_| describe(ctx))
 }
 
 // ------------------------------------------------------------------ editing the source
