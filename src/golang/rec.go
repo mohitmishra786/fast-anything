@@ -150,6 +150,16 @@ func fastAnythingRecCopy(v reflect.Value) reflect.Value {
 	return v
 }
 
+func fastAnythingRecFloatTag(f float64) string {
+	switch {
+	case math.IsNaN(f):
+		return `{"$float":"NaN"}`
+	case f > 0:
+		return `{"$float":"Infinity"}`
+	}
+	return `{"$float":"-Infinity"}`
+}
+
 func fastAnythingRecJSON(v any) (string, error) {
 	var b strings.Builder
 	err := fastAnythingRecEnc(&b, reflect.ValueOf(v))
@@ -177,7 +187,9 @@ func fastAnythingRecEnc(b *strings.Builder, v reflect.Value) error {
 	case reflect.Float32, reflect.Float64:
 		f := v.Float()
 		if math.IsNaN(f) || math.IsInf(f, 0) {
-			return errors.New("NaN or Inf")
+			// JSON has no NaN or infinity: the port's glue reads this form
+			b.WriteString(fastAnythingRecFloatTag(f))
+			return nil
 		}
 		bits := 64
 		if v.Kind() == reflect.Float32 {
@@ -292,7 +304,7 @@ func fastAnythingRecEdges(v any) []any {
 			put(func(n reflect.Value) { n.SetUint(x) })
 		}
 	case reflect.Float32, reflect.Float64:
-		for _, x := range []float64{0, 1, -1, 1e300, 5e-324} {
+		for _, x := range []float64{0, 1, -1, 1e300, 5e-324, math.NaN(), math.Inf(1), math.Inf(-1), math.Copysign(0, -1)} {
 			put(func(n reflect.Value) { n.SetFloat(x) })
 		}
 	case reflect.String:

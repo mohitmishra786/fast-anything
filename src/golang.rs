@@ -484,7 +484,7 @@ pub const FLAVOR: Flavor = Flavor {
         "Map iteration order is random in Go: return results in the order the original does when it's deterministic.",
         "A function returning (T, error): return `Err(message)` where it returns a non-nil error (its message is `err.Error()`); enabled, Go gets `errors.New(message)` back, so callers comparing against sentinel errors (`err == io.EOF`, `errors.Is`) won't match.",
     ],
-    floats: None,
+    floats: Some(native::FLOATS),
 };
 
 pub fn scaffold(ctx: &Ctx, hs: &Hotspot, helpers: &[Hotspot], port: &Port) -> Result<String> {
@@ -734,6 +734,59 @@ func main() {
         assert_eq!(rec.unwrap().calls, 7);
         assert!(lines.contains("{\"args\":[3],\"result\":6}"), "{lines}");
         assert_eq!(after, main, "the app is left as it was");
+    }
+
+    #[test]
+    fn the_bridge_carries_nan_and_infinity() {
+        if !Command::new("go").arg("version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no go on PATH, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("fa-go-bridge-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let bridge = BRIDGE
+            .replace("/*S*/", "t")
+            .replace("/*PKG*/", "main")
+            .replace("/*ID*/", "m.f")
+            .replace("/*PARAMS*/", "xs []float64, m map[string]float64")
+            .replace("/*ARGS*/", "xs, m")
+            .replace("/*RET*/", "map[string][]float64")
+            .replace("/*LIB*/", "\"lib\"")
+            .replace("/*ERRORS*/", "false");
+        // a stand-in for the port: it shows what it was sent, and answers with tagged floats
+        let main = r#"package main
+
+import (
+	"fmt"
+	"math"
+)
+
+var sent string
+
+func faLoad_t(path string) bool { return true }
+
+func faInvoke_t(in []byte) []byte {
+	sent = string(in)
+	return []byte(`{"ok":{"a":[1.5,{"$float":"NaN"},{"$float":"Infinity"},{"$float":"-Infinity"}],"b":[]}}`)
+}
+
+func main() {
+	out, _, ok := faFast_t([]float64{math.NaN(), -0.5, math.Inf(-1)}, map[string]float64{"k": math.Inf(1)})
+	fmt.Println(sent)
+	fmt.Println(ok, out["a"][0], math.IsNaN(out["a"][1]), out["a"][2], out["a"][3], len(out["b"]))
+}
+"#;
+        fs::write(dir.join("go.mod"), "module t\n\ngo 1.22\n").unwrap();
+        fs::write(dir.join("bridge.go"), bridge).unwrap();
+        fs::write(dir.join("main.go"), main).unwrap();
+        let run = Command::new("go").args(["run", "."]).current_dir(&dir).env("CGO_ENABLED", "0").output().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+        assert_eq!(
+            String::from_utf8_lossy(&run.stdout),
+            "[[{\"$float\":\"NaN\"},-0.5,{\"$float\":\"-Infinity\"}],{\"k\":{\"$float\":\"Infinity\"}}]\n\
+             true 1.5 true +Inf -Inf 0\n"
+        );
     }
 
     #[test]

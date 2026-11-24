@@ -4,6 +4,7 @@
 package /*PKG*/
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"math"
@@ -30,7 +31,7 @@ func faFast_/*S*/(/*PARAMS*/) (/*RET*/, error, bool) {
 	}
 	in, err := faJSON_/*S*/([]any{/*ARGS*/})
 	if err != nil {
-		return zero, nil, false // NaN, Inf or non-UTF-8 input: let Go handle it
+		return zero, nil, false // non-UTF-8 input: let Go handle it
 	}
 	var reply struct {
 		Ok    json.RawMessage `json:"ok"`
@@ -46,10 +47,101 @@ func faFast_/*S*/(/*PARAMS*/) (/*RET*/, error, bool) {
 		panic("fast-anything: " + *reply.Error)
 	}
 	var out /*RET*/
-	if err := json.Unmarshal(reply.Ok, &out); err != nil {
+	if bytes.Contains(reply.Ok, []byte(`"$float"`)) {
+		err = faDecode_/*S*/(reply.Ok, reflect.ValueOf(&out).Elem())
+	} else {
+		err = json.Unmarshal(reply.Ok, &out)
+	}
+	if err != nil {
 		panic("fast-anything: " + err.Error())
 	}
 	return out, nil, true
+}
+
+// NaN and infinity travel as {"$float": name}: JSON has no numbers for them.
+func faFloatTag_/*S*/(f float64) string {
+	switch {
+	case math.IsNaN(f):
+		return `{"$float":"NaN"}`
+	case f > 0:
+		return `{"$float":"Infinity"}`
+	}
+	return `{"$float":"-Infinity"}`
+}
+
+// faDecode_/*S*/ is json.Unmarshal into dst, plus tagged NaN and infinity where dst holds floats.
+func faDecode_/*S*/(data []byte, dst reflect.Value) error {
+	d := json.NewDecoder(bytes.NewReader(data))
+	d.UseNumber()
+	var v any
+	if err := d.Decode(&v); err != nil {
+		return err
+	}
+	return faSet_/*S*/(dst, v)
+}
+
+func faSet_/*S*/(dst reflect.Value, v any) error {
+	switch dst.Kind() {
+	case reflect.Float32, reflect.Float64:
+		if m, ok := v.(map[string]any); ok && len(m) == 1 {
+			switch m["$float"] {
+			case "NaN":
+				dst.SetFloat(math.NaN())
+				return nil
+			case "Infinity":
+				dst.SetFloat(math.Inf(1))
+				return nil
+			case "-Infinity":
+				dst.SetFloat(math.Inf(-1))
+				return nil
+			}
+		}
+	case reflect.Slice:
+		xs, ok := v.([]any)
+		if !ok {
+			break
+		}
+		s := reflect.MakeSlice(dst.Type(), len(xs), len(xs))
+		for i, x := range xs {
+			if err := faSet_/*S*/(s.Index(i), x); err != nil {
+				return err
+			}
+		}
+		dst.Set(s)
+		return nil
+	case reflect.Array:
+		xs, ok := v.([]any)
+		if !ok {
+			break
+		}
+		for i := 0; i < dst.Len() && i < len(xs); i++ {
+			if err := faSet_/*S*/(dst.Index(i), xs[i]); err != nil {
+				return err
+			}
+		}
+		return nil
+	case reflect.Map:
+		m, ok := v.(map[string]any)
+		if !ok {
+			break
+		}
+		out := reflect.MakeMapWithSize(dst.Type(), len(m))
+		for k, x := range m {
+			e := reflect.New(dst.Type().Elem()).Elem()
+			if err := faSet_/*S*/(e, x); err != nil {
+				return err
+			}
+			out.SetMapIndex(reflect.ValueOf(k).Convert(dst.Type().Key()), e)
+		}
+		dst.Set(out)
+		return nil
+	}
+	// everything else (and errors) as encoding/json has it
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, dst.Addr().Interface())
 }
 
 func faJSON_/*S*/(v any) (string, error) {
@@ -79,7 +171,8 @@ func faEnc_/*S*/(b *strings.Builder, v reflect.Value) error {
 	case reflect.Float32, reflect.Float64:
 		f := v.Float()
 		if math.IsNaN(f) || math.IsInf(f, 0) {
-			return errors.New("NaN or Inf")
+			b.WriteString(faFloatTag_/*S*/(f))
+			return nil
 		}
 		bits := 64
 		if v.Kind() == reflect.Float32 {
