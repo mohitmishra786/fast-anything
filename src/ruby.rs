@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
 const RUNNER: &str = include_str!("ruby/runner.rb");
 const RECORDER: &str = include_str!("ruby/recorder.rb");
@@ -40,12 +41,24 @@ fn main_guard(text: &str) -> Option<usize> {
 }
 
 fn runner(ctx: &Ctx, ruby: &str, mode: &str, job: Value, app_args: &[String]) -> Result<Output> {
+    runner_for(ctx, ruby, mode, job, app_args, None)
+}
+
+/// runner, stopping the run from outside after `limit` (the app may not stop on Interrupt).
+fn runner_for(
+    ctx: &Ctx,
+    ruby: &str,
+    mode: &str,
+    job: Value,
+    app_args: &[String],
+    limit: Option<Duration>,
+) -> Result<Output> {
     let script = ctx.fast.join("runner.rb");
     fs::write(&script, RUNNER)?;
     fs::write(ctx.fast.join("recorder.rb"), RECORDER)?;
     let job_path = ctx.fast.join(format!("job-{mode}.json"));
     fs::write(&job_path, serde_json::to_vec_pretty(&job)?)?;
-    let out = output(
+    let (out, killed) = crate::util::output_for(
         Command::new(ruby)
             .arg(&script)
             .arg(mode)
@@ -55,16 +68,21 @@ fn runner(ctx: &Ctx, ruby: &str, mode: &str, job: Value, app_args: &[String]) ->
             .current_dir(&ctx.root)
             .stdin(Stdio::null()),
         "ruby",
+        limit,
+        Duration::from_secs(10),
     )?;
+    ensure!(!killed, "the app was still running 15s after --duration: does it stop on Ctrl+C?");
     if !out.status.success() {
         bail!("the ruby {mode} step failed ({}):\n{}", out.status, tail(&combined(&out), 30));
     }
     Ok(out)
 }
 
-pub fn profile(ctx: &Ctx, ruby: &str, args: &[String]) -> Result<Profile> {
+/// `duration`: interrupt the app after that many seconds (servers and GUIs that run until closed).
+pub fn profile(ctx: &Ctx, ruby: &str, args: &[String], duration: Option<f64>) -> Result<Profile> {
     let result = ctx.fast.join("profile.json");
-    runner(ctx, ruby, "profile", json!({ "root": ctx.root, "out": result }), args)?;
+    let job = json!({ "root": ctx.root, "out": result, "duration": duration });
+    runner_for(ctx, ruby, "profile", job, args, duration.map(|d| Duration::from_secs_f64(d + 15.0)))?;
     serde_json::from_str(&fs::read_to_string(&result)?).context("reading the profile")
 }
 
@@ -306,6 +324,25 @@ pub fn disable(ctx: &Ctx, port: &Port) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duration_stops_an_app_that_runs_until_closed() {
+        if !Command::new("ruby").arg("-v").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no ruby on PATH, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("fa-ruby-duration-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        // a server's shape: some work, then a long blocking wait
+        let app = "def work(n)\n  (0...n).sum { |i| i * i % 7 }\nend\n\nif __FILE__ == $0\n  3.times { work(200_000) }\n  sleep 3600\nend\n";
+        fs::write(dir.join("app.rb"), app).unwrap();
+        let ctx = Ctx::open(&dir).unwrap();
+        let p = profile(&ctx, "ruby", &["app.rb".into()], Some(1.0));
+        let _ = fs::remove_dir_all(&dir);
+        let p = p.unwrap();
+        assert!(p.functions.iter().any(|f| f.name == "work" && f.ncalls == 3), "{:?}", p.functions);
+        assert!((0.9..10.0).contains(&p.wall), "{}", p.wall);
+    }
 
     #[test]
     fn ruby_defaults_become_json() {

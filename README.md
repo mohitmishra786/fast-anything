@@ -94,7 +94,7 @@ fast-anything ports the outermost loop it can, not the tiny function called insi
 |---|---|---|
 | Python 3.10+ | PyO3; servers and GUIs: `scan --duration 30` (stops them like Ctrl+C) | ✅ |
 | JavaScript / TypeScript (Node 22+, Bun, Deno 2+: `bun app.ts`, `deno run -A app.ts`) | napi-rs | ✅ |
-| Ruby 3.3+ | C ABI + JSON, through Ruby's built-in Fiddle | ✅ |
+| Ruby 3.3+ | C ABI + JSON, through Ruby's built-in Fiddle; servers: `scan --duration 30` (stops them like Ctrl+C) | ✅ |
 | Java 22+ (`java App.java`, Maven, Gradle) | the same C bridge, through the FFM API | ✅ |
 | Kotlin/JVM (Gradle, `src/main/kotlin`, JDK 22+) | the Java bridge; top-level functions, `object` and companion members, extension functions | ✅ |
 | Go 1.22+ (`go run .`) | the same C bridge, through the Windows loader or dlopen (cgo) | ✅ |
