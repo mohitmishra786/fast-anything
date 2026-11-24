@@ -4,6 +4,15 @@
 #endif
 #include <stdio.h>
 #include <stdlib.h>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <signal.h>
+#include <unistd.h>
+#endif
 #include "fa_clock.h"
 #include "fa_prof.h"
 
@@ -58,7 +67,31 @@ static void fa_prof_save(void) {
     fclose(out);
 }
 
+/* scan --duration: a server runs until closed, so end it after that long; exit() writes the profile
+ * (atexit above). If the app is stuck where exit can't run, scan stops it from outside. */
+#ifdef _WIN32
+static DWORD WINAPI fa_prof_stop(LPVOID ms) {
+    Sleep((DWORD) (size_t) ms);
+    exit(0);
+}
+#else
+static void fa_prof_stop(int sig) {
+    (void) sig;
+    exit(0);
+}
+#endif
+
 __attribute__((constructor)) static void fa_prof_start(void) {
     fa_started = fa_now();
     atexit(fa_prof_save);
+    const char *stop = getenv("FAST_ANYTHING_STOP_AFTER_MS");
+    long ms = stop ? atol(stop) : 0;
+    if (ms > 0) {
+#ifdef _WIN32
+        CreateThread(NULL, 0, fa_prof_stop, (LPVOID) (size_t) ms, 0, NULL);
+#else
+        signal(SIGALRM, fa_prof_stop);
+        alarm((unsigned) ((ms + 999) / 1000));
+#endif
+    }
 }
