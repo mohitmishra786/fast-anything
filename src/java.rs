@@ -631,12 +631,15 @@ mod tests {
         fs::write(dir.join("App.java"), app).unwrap();
         let ctx = Ctx::open(&dir).unwrap();
         let started = Instant::now();
-        let p = profile(&ctx, "java", &["App.java".into()], Some(3.0));
+        // the window starts with the JVM, and `java App.java` compiles the source inside it: that
+        // takes longer on Windows
+        let window = if cfg!(windows) { 8.0 } else { 3.0 };
+        let p = profile(&ctx, "java", &["App.java".into()], Some(window));
         let took = started.elapsed().as_secs_f64();
         let _ = fs::remove_dir_all(&dir);
         let p = p.unwrap();
         assert!(p.functions.iter().any(|f| f.name == "work" && f.cumtime > 0.0), "{:?}", p.functions);
-        assert!(took < 25.0, "{took}");
+        assert!(took < window + 20.0, "{took}");
     }
 
     #[test]
